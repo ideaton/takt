@@ -1,0 +1,39 @@
+[package]
+name = "takt-rp2350"
+description = "Firmware Takt pour RP2350 : coeur 1 = automate déterministe, coeur 0 = communication USB"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/ideaton/takt"
+publish = false
+
+# Hors de l'espace de travail racine (voir `exclude` dans ../../Cargo.toml) :
+# ce crate ne compile que pour thumbv8m.main-none-eabihf.
+
+[[bin]]
+name = "takt-rp2350"
+test = false
+bench = false
+
+[dependencies]
+takt-vm = { path = "../../crates/takt-vm" }
+rp235x-hal = { version = "0.4.0", features = ["rt", "critical-section-impl"] }
+cortex-m = "0.7.7"
+cortex-m-rt = "0.7.5"
+usb-device = "0.3.2"
+usbd-serial = "0.2.2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = 2
+incremental = false
+overflow-checks = false
+panic = "abort"
+
+[profile.dev]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"

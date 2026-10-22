@@ -1,0 +1,11 @@
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.thumbv8m.main-none-eabihf]
+# Pico 2 en BOOTSEL (ou déjà sous Takt avec picotool -f) : charge, vérifie, lance.
+runner = "picotool load -u -v -x -t elf"
+rustflags = [
+    "-C", "link-arg=--nmagic",
+    "-C", "link-arg=-Tlink.x",
+    "-C", "target-cpu=cortex-m33",
+]

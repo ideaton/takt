@@ -1,0 +1,154 @@
+{
+  "name": "Convoyeur",
+  "device": {
+    "name": "API_1",
+    "board": "pico2",
+    "cycle_us": 1000
+  },
+  "tags": [
+    {
+      "name": "BP_Marche",
+      "type": "BOOL",
+      "address": "%I0.0",
+      "comment": "Bouton marche (NO)"
+    },
+    {
+      "name": "BP_Arret",
+      "type": "BOOL",
+      "address": "%I0.1",
+      "comment": "Bouton arrêt (NF)"
+    },
+    {
+      "name": "Capteur_Piece",
+      "type": "BOOL",
+      "address": "%I0.2",
+      "comment": "Détecteur de pièce"
+    },
+    {
+      "name": "Retour_Marche",
+      "type": "BOOL",
+      "address": "%I0.3",
+      "comment": "Contact de retour du contacteur"
+    },
+    {
+      "name": "BP_Reset",
+      "type": "BOOL",
+      "address": "%I0.4",
+      "comment": "Remise à zéro du compteur"
+    },
+    {
+      "name": "Moteur_Convoyeur",
+      "type": "BOOL",
+      "address": "%Q0.0",
+      "comment": "Contacteur moteur"
+    },
+    {
+      "name": "Voyant_Defaut",
+      "type": "BOOL",
+      "address": "%Q0.1",
+      "comment": "Voyant rouge"
+    },
+    {
+      "name": "Lot_Termine",
+      "type": "BOOL",
+      "address": "%Q0.2",
+      "comment": "Voyant vert : lot complet"
+    },
+    {
+      "name": "Alarme_Niveau",
+      "type": "BOOL",
+      "address": "%Q0.3",
+      "comment": "Trémie presque vide"
+    },
+    {
+      "name": "Niveau_Tremie",
+      "type": "INT",
+      "address": "%IW0",
+      "comment": "Capteur de niveau 0..10 V"
+    },
+    {
+      "name": "Nb_Pieces",
+      "type": "INT",
+      "address": "%MW0",
+      "comment": "Pièces du lot en cours"
+    },
+    {
+      "name": "Niveau_Moyen",
+      "type": "REAL",
+      "address": "%MD4",
+      "comment": "Niveau filtré en %"
+    },
+    {
+      "name": "Historique",
+      "type": "ARRAY[0..7] OF REAL",
+      "address": "",
+      "comment": "8 dernières mesures de niveau"
+    }
+  ],
+  "blocks": [
+    {
+      "name": "Main",
+      "source": "ORGANIZATION_BLOCK Main\n// Bloc cyclique principal (OB1) : convoyeur avec comptage de pièces\nVAR\n    moteur     : FB_Moteur;\n    fronts     : R_TRIG;\n    compteur   : CTU;\n    niveau_pct : REAL;\nEND_VAR\nVAR CONSTANT\n    LOT : INT := 10;\nEND_VAR\nBEGIN\n    // Commande du moteur : marche/arrêt avec auto-maintien et défaut de démarrage\n    #moteur(Marche := \"BP_Marche\",\n            Arret  := NOT \"BP_Arret\" OR \"Lot_Termine\",\n            Retour := \"Capteur_Piece\" OR \"Retour_Marche\",\n            Tempo_Defaut := T#5s);\n    \"Moteur_Convoyeur\" := #moteur.Sortie;\n    \"Voyant_Defaut\" := #moteur.Defaut;\n\n    // Comptage des pièces sur front montant du capteur\n    #fronts(CLK := \"Capteur_Piece\");\n    #compteur(CU := #fronts.Q, R := \"BP_Reset\" OR FirstScan, PV := #LOT);\n    \"Nb_Pieces\" := #compteur.CV;\n    \"Lot_Termine\" := #compteur.Q;\n\n    // Niveau de la trémie : 0..27648 → 0..100 %\n    #niveau_pct := SCALE_X(MIN := 0.0, VALUE := NORM_X(MIN := 0, VALUE := \"Niveau_Tremie\", MAX := 27648), MAX := 100.0);\n    \"Niveau_Moyen\" := Moyenne(#niveau_pct);\n    \"Alarme_Niveau\" := \"Niveau_Moyen\" < 10.0;\nEND_ORGANIZATION_BLOCK\n"
+    },
+    {
+      "name": "FB_Moteur",
+      "source": "FUNCTION_BLOCK FB_Moteur\n// Moteur avec auto-maintien et surveillance du retour de marche\nVAR_INPUT\n    Marche       : BOOL;\n    Arret        : BOOL;\n    Retour       : BOOL;\n    Tempo_Defaut : TIME := T#3s;\nEND_VAR\nVAR_OUTPUT\n    Sortie : BOOL;\n    Defaut : BOOL;\nEND_VAR\nVAR\n    surveillance : TON;\nEND_VAR\nBEGIN\n    IF #Arret OR #Defaut THEN\n        #Sortie := FALSE;\n    ELSIF #Marche THEN\n        #Sortie := TRUE;\n    END_IF;\n\n    // Défaut si la marche n'est pas confirmée à temps\n    #surveillance(IN := #Sortie AND NOT #Retour, PT := #Tempo_Defaut);\n    IF #surveillance.Q THEN\n        #Defaut := TRUE;\n    END_IF;\n    IF #Marche AND #Arret THEN\n        #Defaut := FALSE;   // acquittement : marche + arrêt ensemble\n    END_IF;\nEND_FUNCTION_BLOCK\n"
+    },
+    {
+      "name": "Moyenne",
+      "source": "FUNCTION Moyenne : REAL\n// Moyenne glissante sur 8 mesures (les mémoires sont dans \"Historique\")\nVAR_INPUT\n    Mesure : REAL;\nEND_VAR\nVAR\n    i     : INT;\n    somme : REAL;\nEND_VAR\nBEGIN\n    FOR #i := 7 TO 1 BY -1 DO\n        \"Historique\"[#i] := \"Historique\"[#i - 1];\n    END_FOR;\n    \"Historique\"[0] := #Mesure;\n    #somme := 0.0;\n    FOR #i := 0 TO 7 DO\n        #somme := #somme + \"Historique\"[#i];\n    END_FOR;\n    Moyenne := #somme / 8.0;\nEND_FUNCTION\n"
+    }
+  ],
+  "watch_tables": [
+    {
+      "name": "Mise en service",
+      "rows": [
+        {
+          "path": "BP_Marche",
+          "modify": "",
+          "force": false
+        },
+        {
+          "path": "BP_Arret",
+          "modify": "",
+          "force": false
+        },
+        {
+          "path": "Capteur_Piece",
+          "modify": "",
+          "force": false
+        },
+        {
+          "path": "Moteur_Convoyeur",
+          "modify": "",
+          "force": false
+        },
+        {
+          "path": "Voyant_Defaut",
+          "modify": "",
+          "force": false
+        },
+        {
+          "path": "Nb_Pieces",
+          "modify": "",
+          "force": false
+        },
+        {
+          "path": "Main.moteur.surveillance.ET",
+          "modify": "",
+          "force": false
+        },
+        {
+          "path": "Niveau_Tremie",
+          "modify": "",
+          "force": false
+        },
+        {
+          "path": "Niveau_Moyen",
+          "modify": "",
+          "force": false
+        }
+      ]
+    }
+  ]
+}

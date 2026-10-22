@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/takt-vm", "crates/takt-compiler", "crates/takt-ide"]
+exclude = ["firmware"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/ideaton/takt"
+
+[workspace.dependencies]
+takt-vm = { path = "crates/takt-vm" }
+takt-compiler = { path = "crates/takt-compiler" }
+
+[profile.release]
+lto = true

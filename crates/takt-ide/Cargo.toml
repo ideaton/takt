@@ -1,0 +1,18 @@
+[package]
+name = "takt-ide"
+description = "Takt Studio : IDE façon TIA Portal pour automates RP2350 déterministes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "takt-studio"
+path = "src/main.rs"
+
+[dependencies]
+takt-vm.workspace = true
+takt-compiler.workspace = true
+eframe = "0.31"
+rfd = "0.15"
+serialport = "4"

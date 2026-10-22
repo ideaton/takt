@@ -1,0 +1,9 @@
+[package]
+name = "takt-vm"
+description = "Machine virtuelle deterministe de Takt (no_std) : bytecode, blocs standard, runtime et protocole"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
