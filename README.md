@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.svg" width="96" alt="Logo Takt"></p>
+
 # Takt
 
 **Un automate programmable à 5 €, avec un temps de cycle prouvé avant le téléchargement.**
@@ -45,10 +47,13 @@ WCET par bloc :
 
 ## Takt Studio (l'IDE)
 
-Disposition et raccourcis de TIA Portal :
+![Éditeur de Takt Studio](docs/editeur.png)
 
-- **Navigateur du projet** : appareil, blocs de programme (OB / FB / FC),
-  variables API, tables de visualisation et de forçage.
+Les notions et les raccourcis de TIA Portal, dans une interface épurée façon
+Apple (police Inter, icônes Lucide, thème clair et sombre) :
+
+- **Barre latérale** : appareil, variables API, blocs de programme (OB / FB / FC),
+  tables de visualisation et de forçage, état de la liaison.
 - **Configuration de l'appareil** : choix de la carte, schéma des broches,
   temps de cycle, jauge « temps de cycle garanti ».
 - **Éditeur ST** : coloration, erreurs dans la marge, carte « Instructions »
@@ -60,7 +65,9 @@ Disposition et raccourcis de TIA Portal :
 - **Diagnostic** : WCET prouvé et temps mesuré (min/max), gigue, dépassements,
   histogramme.
 - **PLCSIM intégré** : le simulateur exécute exactement le runtime du
-  firmware, avec des boutons pour les entrées et des voyants pour les sorties.
+  firmware, avec des interrupteurs pour les entrées et des voyants pour les sorties.
+
+![Visualisation en ligne avec le simulateur](docs/visualisation.png)
 
 | Raccourci | Action |
 |---|---|
@@ -94,6 +101,7 @@ le pire cas exact et interdit la récursion par construction.
 | `crates/takt-ide` | Takt Studio (egui). |
 | `firmware/takt-rp2350` | Firmware RP2350 (deux cœurs, exécution en SRAM). |
 | `examples/` | Projet d'exemple : convoyeur avec moteur, comptage et niveau analogique. |
+| `tools/logo.py` | Génère le logo (SVG, PNG, ICO). |
 
 ## Compiler et lancer
 
@@ -128,6 +136,13 @@ cd firmware/takt-rp2350 && cargo build --release
   Modbus/Ethernet.
 - L'identifiant USB est celui de test de pid.codes (1209:0001).
 
+Captures d'écran de l'interface, rendues hors écran dans `target/captures` :
+
+```bash
+cargo test -p takt-ide captures -- --ignored
+```
+
 ## Licence
 
-GPL-3.0, voir [LICENSE](LICENSE).
+GPL-3.0, voir [LICENSE](LICENSE). Police Inter (SIL OFL 1.1) et icônes Lucide
+(ISC), voir `crates/takt-ide/assets/fonts`.

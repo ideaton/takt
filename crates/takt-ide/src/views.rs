@@ -1,7 +1,7 @@
 //! Vues du projet : appareil, variables API, tables de visualisation et
-//! inspecteur (Info, Diagnostic, Simulation, Journal).
+//! tiroir du bas (messages, diagnostic, simulation, journal).
 
-use eframe::egui::{self, Color32, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use eframe::egui::{self, Color32, FontId, RichText, Sense, Ui, pos2, vec2};
 use takt_compiler::board::{self, BOARDS, Board};
 use takt_compiler::project::{Tag, WatchRow};
 use takt_compiler::types::{Ty, format_value, parse_value};
@@ -10,19 +10,20 @@ use takt_vm::image::IoKind;
 use takt_vm::proto;
 use takt_vm::runtime::Mode;
 
-use crate::app::{ACCENT, App, BottomTab, GREEN, ORANGE, RED, View};
+use crate::app::{App, BottomTab, View};
 use crate::target;
+use crate::theme::{self, Colors, icon};
 
 pub fn board_name(id: &str) -> &'static str {
     board::find(id).map(|b| b.name).unwrap_or("carte inconnue")
 }
 
-fn kind_color(k: IoKind) -> Color32 {
+fn kind_color(c: &Colors, k: IoKind) -> Color32 {
     match k {
-        IoKind::Di => Color32::from_rgb(40, 150, 60),
-        IoKind::Dq => Color32::from_rgb(220, 120, 0),
-        IoKind::Ai => Color32::from_rgb(40, 110, 200),
-        IoKind::Aq => Color32::from_rgb(140, 70, 180),
+        IoKind::Di => c.green,
+        IoKind::Dq => c.orange,
+        IoKind::Ai => c.accent,
+        IoKind::Aq => Color32::from_rgb(175, 82, 222),
     }
 }
 
@@ -31,7 +32,7 @@ fn kind_name(k: IoKind) -> &'static str {
         IoKind::Di => "Entrée TOR",
         IoKind::Dq => "Sortie TOR",
         IoKind::Ai => "Entrée analogique",
-        IoKind::Aq => "Sortie analogique (PWM)",
+        IoKind::Aq => "Sortie analogique",
     }
 }
 
@@ -42,62 +43,110 @@ fn tag_at(tags: &[Tag], kind: IoKind, channel: u16) -> Option<&Tag> {
     })
 }
 
+/// Petit libellé gris au-dessus d'une liste.
+fn caption(ui: &mut Ui, text: &str) {
+    ui.label(RichText::new(text).size(12.5).color(theme::colors(ui).soft));
+}
+
+/// Champs blancs sur les cartes grises, comme les formulaires iOS.
+fn white_fields(ui: &mut Ui) {
+    let c = theme::colors(ui);
+    ui.visuals_mut().extreme_bg_color = c.bg;
+}
+
+fn soft(ui: &Ui, text: impl Into<String>) -> RichText {
+    RichText::new(text).color(theme::colors(ui).soft)
+}
+
+/// Barre de progression fine et arrondie.
+fn slim_bar(ui: &mut Ui, ratio: f32, color: Color32, width: f32) {
+    let c = theme::colors(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 8.0), Sense::hover());
+    ui.painter().rect_filled(rect, 4.0, c.very_soft.gamma_multiply(0.5));
+    let mut fill = rect;
+    fill.set_width(rect.width() * ratio.clamp(0.0, 1.0));
+    ui.painter().rect_filled(fill, 4.0, color);
+}
+
 // ---------------------------------------------------------------------------
-// Configuration de l'appareil
+// Appareil
 
 pub fn device_view(app: &mut App, ui: &mut Ui) {
+    let c = theme::colors(ui);
     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-        ui.heading(format!("Vue des appareils — {}", app.project.device.name));
-        ui.add_space(6.0);
         ui.horizontal_top(|ui| {
             let board = board::find(&app.project.device.board).unwrap_or(&BOARDS[0]);
-            draw_board(ui, board, &app.project.tags);
-            ui.add_space(16.0);
+            theme::card(ui, |ui| draw_board(ui, board, &app.project.tags));
+            ui.add_space(12.0);
             ui.vertical(|ui| {
-                device_properties(app, ui);
+                ui.set_max_width(460.0);
+                theme::card(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    white_fields(ui);
+                    device_settings(app, ui);
+                });
+                ui.add_space(12.0);
+                theme::card(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    cycle_card(app, ui);
+                });
             });
         });
-        ui.add_space(10.0);
-        ui.label(RichText::new("Vue d'ensemble des voies").strong());
+        ui.add_space(18.0);
+        theme::section_title(ui, "Voies d'entrées / sorties");
+        ui.add_space(6.0);
         let board = board::find(&app.project.device.board).unwrap_or(&BOARDS[0]);
-        egui::Grid::new("io_overview").striped(true).num_columns(5).show(ui, |ui| {
-            for h in ["Adresse", "Type", "GPIO", "Variable", "Commentaire"] {
-                ui.label(RichText::new(h).strong());
-            }
-            ui.end_row();
-            for kind in [IoKind::Di, IoKind::Dq, IoKind::Ai, IoKind::Aq] {
-                for (ch, pin) in board.pins(kind).iter().enumerate() {
-                    let tag = tag_at(&app.project.tags, kind, ch as u16);
-                    ui.label(RichText::new(Board::address_of(kind, ch as u16)).monospace());
-                    ui.label(RichText::new(kind_name(kind)).color(kind_color(kind)));
-                    ui.label(format!("GP{pin}"));
-                    ui.label(tag.map(|t| t.name.as_str()).unwrap_or("—"));
-                    ui.label(RichText::new(tag.map(|t| t.comment.as_str()).unwrap_or("")).weak());
-                    ui.end_row();
+        theme::card(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::Grid::new("io_overview").num_columns(5).spacing(vec2(28.0, 10.0)).striped(false).show(ui, |ui| {
+                for h in ["Adresse", "Type", "Broche", "Variable", "Commentaire"] {
+                    caption(ui, h);
                 }
-            }
+                ui.end_row();
+                for kind in [IoKind::Di, IoKind::Dq, IoKind::Ai, IoKind::Aq] {
+                    for (ch, pin) in board.pins(kind).iter().enumerate() {
+                        let tag = tag_at(&app.project.tags, kind, ch as u16);
+                        ui.label(RichText::new(Board::address_of(kind, ch as u16)).monospace());
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
+                            ui.painter().circle_filled(r.center(), 4.0, kind_color(&c, kind));
+                            ui.label(kind_name(kind));
+                        });
+                        ui.label(soft(ui, format!("GP{pin}")));
+                        match tag {
+                            Some(t) => ui.label(RichText::new(&t.name).font(FontId::new(14.0, theme::medium()))),
+                            None => ui.label(soft(ui, "libre")),
+                        };
+                        ui.label(soft(ui, tag.map(|t| t.comment.as_str()).unwrap_or("")));
+                        ui.end_row();
+                    }
+                }
+            });
         });
+        ui.add_space(24.0);
     });
 }
 
-fn device_properties(app: &mut App, ui: &mut Ui) {
+fn device_settings(app: &mut App, ui: &mut Ui) {
     let mut changed = false;
-    egui::Grid::new("device_props").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-        ui.label("Nom de l'appareil");
-        changed |= ui.text_edit_singleline(&mut app.project.device.name).changed();
+    theme::section_title(ui, "Réglages");
+    ui.add_space(8.0);
+    egui::Grid::new("device_props").num_columns(2).spacing(vec2(18.0, 10.0)).show(ui, |ui| {
+        ui.label(soft(ui, "Nom"));
+        changed |= ui.add_sized([240.0, 26.0], egui::TextEdit::singleline(&mut app.project.device.name)).changed();
         ui.end_row();
-        ui.label("Carte");
+        ui.label(soft(ui, "Carte"));
         let current = board_name(&app.project.device.board);
-        egui::ComboBox::from_id_salt("board").selected_text(current).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("board").selected_text(current).width(240.0).show_ui(ui, |ui| {
             for b in BOARDS {
                 changed |= ui.selectable_value(&mut app.project.device.board, b.id.to_string(), b.name).changed();
             }
         });
         ui.end_row();
         ui.label("");
-        ui.label(RichText::new(board::find(&app.project.device.board).map(|b| b.description).unwrap_or("")).weak());
+        ui.label(soft(ui, board::find(&app.project.device.board).map(|b| b.description).unwrap_or("")).size(12.5));
         ui.end_row();
-        ui.label("Temps de cycle");
+        ui.label(soft(ui, "Temps de cycle"));
         changed |= ui
             .add(egui::DragValue::new(&mut app.project.device.cycle_us).range(100..=1_000_000).speed(10).suffix(" µs"))
             .on_hover_text("Période fixe du cycle automate. Le compilateur prouve que le programme tient dedans.")
@@ -107,89 +156,92 @@ fn device_properties(app: &mut App, ui: &mut Ui) {
     if changed {
         app.touch();
     }
-    ui.add_space(12.0);
-    ui.label(RichText::new("Temps de cycle garanti").strong());
+}
+
+fn cycle_card(app: &mut App, ui: &mut Ui) {
+    let c = theme::colors(ui);
+    theme::section_title(ui, "Temps de cycle garanti");
+    ui.add_space(8.0);
     match (&app.compiled, app.up_to_date()) {
-        (Some(c), true) => {
-            let w = &c.wcet;
+        (Some(cp), true) => {
+            let w = &cp.wcet;
             let ratio = w.ratio() as f32;
             let color = if ratio > 1.0 {
-                RED
+                c.red
             } else if ratio > takt_compiler::WCET_WARN_RATIO as f32 {
-                ORANGE
+                c.orange
             } else {
-                GREEN
+                c.green
             };
-            ui.add(egui::ProgressBar::new(ratio.min(1.0)).desired_width(320.0).fill(color).text(format!(
-                "pire cas {} µs / cycle {} µs ({:.0} %)",
-                w.total_us,
-                w.cycle_us,
-                ratio * 100.0
-            )));
-            egui::Grid::new("wcet").num_columns(3).striped(true).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!("{} µs", w.total_us)).font(FontId::new(26.0, theme::semi())).color(color),
+                );
+                ui.label(soft(ui, format!("au pire, pour un cycle de {} µs", w.cycle_us)));
+            });
+            slim_bar(ui, ratio, color, ui.available_width());
+            ui.label(soft(ui, format!("{:.0} % du cycle utilisé au pire cas", ratio * 100.0)).size(12.5));
+            ui.add_space(8.0);
+            egui::Grid::new("wcet").num_columns(2).spacing(vec2(24.0, 6.0)).show(ui, |ui| {
                 for b in &w.blocks {
                     ui.label(&b.name);
-                    ui.label(format!("{} cycles", b.cycles));
-                    ui.label(format!("{} µs", takt_vm::cost::cycles_to_us(b.cycles)));
+                    ui.label(soft(ui, format!("{} µs", takt_vm::cost::cycles_to_us(b.cycles))));
                     ui.end_row();
                 }
                 ui.label("Partie fixe (E/S, forçage, communication)");
-                ui.label(format!("{} cycles", w.overhead_cycles));
-                ui.label(format!("{} µs", takt_vm::cost::cycles_to_us(w.overhead_cycles)));
+                ui.label(soft(ui, format!("{} µs", takt_vm::cost::cycles_to_us(w.overhead_cycles))));
                 ui.end_row();
             });
         }
         _ => {
-            ui.label(RichText::new("Compilez (Ctrl+B) pour calculer le pire temps de cycle.").weak());
-            if ui.button("⚙ Compiler").clicked() {
+            ui.label(soft(ui, "Compilez pour calculer le pire temps de cycle."));
+            ui.add_space(4.0);
+            if theme::secondary_button(ui, icon::HAMMER, "Compiler").clicked() {
                 app.compile();
             }
         }
     }
 }
 
-/// Dessin schématique de la carte, avec les voies utilisées.
+/// Schéma épuré de la carte avec les voies utilisées.
 fn draw_board(ui: &mut Ui, board: &Board, tags: &[Tag]) {
-    let pin_h = 18.0;
-    let n_pins = 20.0;
-    let size = vec2(360.0, n_pins * pin_h + 60.0);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    let p = ui.painter_at(rect);
-    let pcb = egui::Rect::from_center_size(rect.center(), vec2(110.0, n_pins * pin_h + 40.0));
-    p.rect_filled(pcb, 6.0, Color32::from_rgb(20, 110, 60));
-    p.rect_stroke(pcb, 6.0, Stroke::new(1.0_f32, Color32::from_rgb(10, 70, 40)), StrokeKind::Inside);
-    let chip = egui::Rect::from_center_size(pcb.center(), vec2(46.0, 46.0));
-    p.rect_filled(chip, 2.0, Color32::from_gray(30));
-    p.text(chip.center(), egui::Align2::CENTER_CENTER, "RP2350", egui::FontId::proportional(10.0), Color32::WHITE);
-    let usb = egui::Rect::from_center_size(pos2(pcb.center().x, pcb.top() + 4.0), vec2(30.0, 14.0));
-    p.rect_filled(usb, 2.0, Color32::from_gray(180));
-
-    // Broches utilisées, réparties sur les deux côtés
+    let c = theme::colors(ui);
+    let pin_h = 21.0;
     let mut used = Vec::new();
     for kind in [IoKind::Di, IoKind::Dq, IoKind::Ai, IoKind::Aq] {
         for (ch, pin) in board.pins(kind).iter().enumerate() {
-            let tag = tag_at(tags, kind, ch as u16).map(|t| t.name.clone());
-            used.push((*pin, kind, ch as u16, tag));
+            used.push((*pin, kind, ch as u16, tag_at(tags, kind, ch as u16).map(|t| t.name.clone())));
         }
     }
     used.sort_by_key(|u| u.0);
     let half = used.len().div_ceil(2);
+    let size = vec2(420.0, half as f32 * pin_h + 70.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter_at(rect);
+    let pcb = egui::Rect::from_center_size(rect.center(), vec2(96.0, half as f32 * pin_h + 50.0));
+    p.rect_filled(pcb, 14.0, if ui.visuals().dark_mode { Color32::from_gray(60) } else { Color32::from_gray(225) });
+    let chip = egui::Rect::from_center_size(pcb.center(), vec2(44.0, 44.0));
+    p.rect_filled(chip, 6.0, if ui.visuals().dark_mode { Color32::from_gray(30) } else { Color32::from_gray(45) });
+    p.text(chip.center(), egui::Align2::CENTER_CENTER, "RP2350", FontId::new(9.5, theme::medium()), Color32::WHITE);
+    let usb = egui::Rect::from_center_size(pos2(pcb.center().x, pcb.top() + 2.0), vec2(28.0, 10.0));
+    p.rect_filled(usb, 3.0, c.very_soft);
     for (i, (pin, kind, ch, tag)) in used.iter().enumerate() {
         let left = i < half;
         let row = if left { i } else { i - half } as f32;
-        let y = pcb.top() + 30.0 + row * pin_h;
+        let y = pcb.top() + 34.0 + row * pin_h;
         let x = if left { pcb.left() } else { pcb.right() };
-        let c = kind_color(*kind);
-        p.circle_filled(pos2(x, y), 5.0, if tag.is_some() { c } else { Color32::from_gray(200) });
-        let label = format!("GP{pin} {}", Board::address_of(*kind, *ch));
-        let text = match tag {
-            Some(t) => format!("{label}  {t}"),
-            None => label,
-        };
+        let col = kind_color(&c, *kind);
+        p.circle_filled(pos2(x, y), 4.5, if tag.is_some() { col } else { c.very_soft });
         let (anchor, tx) =
-            if left { (egui::Align2::RIGHT_CENTER, x - 9.0) } else { (egui::Align2::LEFT_CENTER, x + 9.0) };
-        let color = if tag.is_some() { c } else { ui.visuals().weak_text_color() };
-        p.text(pos2(tx, y), anchor, text, egui::FontId::monospace(10.5), color);
+            if left { (egui::Align2::RIGHT_CENTER, x - 10.0) } else { (egui::Align2::LEFT_CENTER, x + 10.0) };
+        let label = match tag {
+            Some(t) => t.to_string(),
+            None => format!("GP{pin}"),
+        };
+        let addr = Board::address_of(*kind, *ch);
+        let text = if left { format!("{label}  {addr}") } else { format!("{addr}  {label}") };
+        let color = if tag.is_some() { c.text } else { c.soft };
+        p.text(pos2(tx, y), anchor, text, FontId::proportional(11.5), color);
     }
 }
 
@@ -197,9 +249,9 @@ fn draw_board(ui: &mut Ui, board: &Board, tags: &[Tag]) {
 // Variables API
 
 pub fn tags_view(app: &mut App, ui: &mut Ui) {
+    let c = theme::colors(ui);
     ui.horizontal(|ui| {
-        ui.heading("Variables API — table standard");
-        if ui.button("➕ Ajouter").clicked() {
+        if theme::secondary_button(ui, icon::PLUS, "Ajouter une variable").clicked() {
             app.project.tags.push(Tag {
                 name: format!("Variable_{}", app.project.tags.len() + 1),
                 ty: "BOOL".into(),
@@ -208,6 +260,7 @@ pub fn tags_view(app: &mut App, ui: &mut Ui) {
             app.touch();
         }
     });
+    ui.add_space(10.0);
     let online = app.online() && app.compiled.is_some();
     let errors: Vec<(u32, String)> = app
         .diags
@@ -218,32 +271,39 @@ pub fn tags_view(app: &mut App, ui: &mut Ui) {
     let mut changed = false;
     let mut remove = None;
     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-        egui::Grid::new("tags").striped(true).num_columns(if online { 7 } else { 6 }).spacing(vec2(8.0, 4.0)).show(
-            ui,
-            |ui| {
+        theme::card(ui, |ui| {
+            ui.set_width(ui.available_width());
+            white_fields(ui);
+            let cols = if online { 7 } else { 6 };
+            egui::Grid::new("tags").num_columns(cols).spacing(vec2(10.0, 8.0)).striped(false).show(ui, |ui| {
                 ui.label("");
                 for h in ["Nom", "Type", "Adresse", "Commentaire"] {
-                    ui.label(RichText::new(h).strong());
+                    caption(ui, h);
                 }
                 if online {
-                    ui.label(RichText::new("Valeur de visualisation").strong());
+                    caption(ui, "Valeur");
                 }
                 ui.label("");
                 ui.end_row();
                 for (i, t) in app.project.tags.iter_mut().enumerate() {
-                    let err = errors.iter().find(|(l, _)| *l == i as u32 + 1);
-                    match err {
+                    match errors.iter().find(|(l, _)| *l == i as u32 + 1) {
                         Some((_, m)) => {
-                            ui.label(RichText::new("●").color(RED)).on_hover_text(m);
+                            ui.label(theme::icon_text(icon::ALERT, 15.0).color(c.red)).on_hover_text(m);
                         }
                         None => {
-                            ui.label(RichText::new(icon_for(&t.address)).weak());
+                            let dot = match board::parse_address(&t.address) {
+                                Ok((board::Address::Io { kind, .. }, _)) => kind_color(&c, kind),
+                                _ => c.very_soft,
+                            };
+                            let (r, _) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::hover());
+                            ui.painter().circle_filled(r.center(), 4.0, dot);
                         }
                     }
-                    changed |= ui.add(egui::TextEdit::singleline(&mut t.name).desired_width(150.0)).changed();
+                    changed |= ui.add_sized([180.0, 26.0], egui::TextEdit::singleline(&mut t.name)).changed();
                     ui.horizontal(|ui| {
-                        changed |= ui.add(egui::TextEdit::singleline(&mut t.ty).desired_width(110.0)).changed();
-                        ui.menu_button("▾", |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        changed |= ui.add_sized([130.0, 26.0], egui::TextEdit::singleline(&mut t.ty)).changed();
+                        ui.menu_button(theme::icon_text(icon::CHEVRON_DOWN, 13.0).color(c.soft), |ui| {
                             for ty in ["BOOL", "INT", "DINT", "REAL", "TIME", "ARRAY[0..9] OF INT"] {
                                 if ui.button(ty).clicked() {
                                     t.ty = ty.into();
@@ -254,29 +314,29 @@ pub fn tags_view(app: &mut App, ui: &mut Ui) {
                         });
                     });
                     changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut t.address)
-                                .desired_width(70.0)
-                                .font(egui::TextStyle::Monospace),
+                        .add_sized(
+                            [80.0, 26.0],
+                            egui::TextEdit::singleline(&mut t.address).font(egui::TextStyle::Monospace),
                         )
                         .changed();
-                    changed |= ui.add(egui::TextEdit::singleline(&mut t.comment).desired_width(240.0)).changed();
+                    changed |= ui.add_sized([280.0, 26.0], egui::TextEdit::singleline(&mut t.comment)).changed();
                     if online {
-                        let c = app.compiled.as_ref().unwrap();
-                        match c.resolve(&t.name) {
+                        let cp = app.compiled.as_ref().unwrap();
+                        match cp.resolve(&t.name) {
                             Some((slot, ty)) => value_label(ui, app.values.get(&slot).copied(), &ty),
                             None => {
                                 ui.label("");
                             }
                         }
                     }
-                    if ui.small_button("🗑").on_hover_text("Supprimer la variable").clicked() {
+                    if theme::ghost_icon(ui, icon::TRASH, "Supprimer la variable").clicked() {
                         remove = Some(i);
                     }
                     ui.end_row();
                 }
-            },
-        );
+            });
+        });
+        ui.add_space(24.0);
     });
     if let Some(i) = remove {
         app.project.tags.remove(i);
@@ -287,27 +347,18 @@ pub fn tags_view(app: &mut App, ui: &mut Ui) {
     }
 }
 
-fn icon_for(address: &str) -> &'static str {
-    match board::parse_address(address) {
-        Ok((board::Address::Io { kind: IoKind::Di | IoKind::Ai, .. }, _)) => "⮊",
-        Ok((board::Address::Io { .. }, _)) => "⮈",
-        _ => "▫",
-    }
-}
-
 fn value_label(ui: &mut Ui, v: Option<u32>, ty: &Ty) {
+    let c = theme::colors(ui);
     match v {
+        Some(v) if *ty == Ty::Bool => {
+            let on = v != 0;
+            theme::chip(ui, if on { "TRUE" } else { "FALSE" }, if on { c.green } else { c.soft });
+        }
         Some(v) => {
-            let text = format_value(v, ty);
-            let color = match ty {
-                Ty::Bool if v != 0 => GREEN,
-                Ty::Bool => Color32::from_gray(130),
-                _ => ui.visuals().text_color(),
-            };
-            ui.label(RichText::new(text).monospace().color(color));
+            ui.label(RichText::new(format_value(v, ty)).monospace().color(c.text));
         }
         None => {
-            ui.label(RichText::new("…").weak());
+            ui.label(soft(ui, "…"));
         }
     }
 }
@@ -316,24 +367,17 @@ fn value_label(ui: &mut Ui, v: Option<u32>, ty: &Ty) {
 // Tables de visualisation et de forçage
 
 pub fn watch_view(app: &mut App, ui: &mut Ui, i: usize) {
+    let c = theme::colors(ui);
     let online = app.online();
     ui.horizontal(|ui| {
-        let mut name = app.project.watch_tables[i].name.clone();
-        if ui.add(egui::TextEdit::singleline(&mut name).font(egui::TextStyle::Heading).desired_width(320.0)).changed() {
-            app.project.watch_tables[i].name = name;
-            app.touch();
-        }
-    });
-    ui.horizontal(|ui| {
         ui.add_enabled_ui(online, |ui| {
-            if ui
-                .button("⚡ Modifier une fois")
-                .on_hover_text("Écrit les valeurs de modification non forcées")
+            if theme::secondary_button(ui, icon::ZAP, "Modifier une fois")
+                .on_hover_text("Écrit les valeurs de modification des lignes non forcées")
                 .clicked()
             {
                 modify_once(app, i);
             }
-            if ui.button("🔓 Tout déforcer").clicked()
+            if theme::secondary_button(ui, icon::LOCK_OPEN, "Tout déforcer").clicked()
                 && app.with_target(|t| target::call(t, proto::UNFORCE_ALL, &[])).is_some()
             {
                 for r in &mut app.project.watch_tables[i].rows {
@@ -342,65 +386,110 @@ pub fn watch_view(app: &mut App, ui: &mut Ui, i: usize) {
                 app.log("Tous les forçages sont supprimés.");
             }
         });
+        ui.add_space(8.0);
         if !online {
-            ui.label(RichText::new("Passez en ligne (Ctrl+K) pour visualiser et forcer.").weak());
+            ui.label(soft(ui, "Connectez-vous pour visualiser et forcer."));
         } else if !app.up_to_date() {
-            ui.label(RichText::new("⚠ Projet modifié depuis la compilation : chemins non résolus.").color(ORANGE));
+            theme::chip(ui, "projet modifié depuis la compilation", c.orange);
         }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let mut name = app.project.watch_tables[i].name.clone();
+            white_fields(ui);
+            if ui.add(egui::TextEdit::singleline(&mut name).desired_width(240.0).hint_text("Nom de la table")).changed()
+            {
+                app.project.watch_tables[i].name = name;
+                app.touch();
+            }
+            ui.label(soft(ui, "Nom"));
+        });
     });
-    ui.separator();
+    ui.add_space(10.0);
 
     let mut actions: Vec<(usize, bool)> = Vec::new();
     let mut remove = None;
     let mut changed = false;
-    egui::Grid::new(("watch", i)).striped(true).num_columns(6).spacing(vec2(10.0, 4.0)).show(ui, |ui| {
-        for h in ["Nom", "Type", "Valeur de visualisation", "Valeur de modification", "Forcer", ""] {
-            ui.label(RichText::new(h).strong());
-        }
-        ui.end_row();
-        let compiled = app.compiled.as_ref();
-        for (k, r) in app.project.watch_tables[i].rows.iter_mut().enumerate() {
-            let resolved = compiled.and_then(|c| c.resolve(&r.path));
-            changed |= ui
-                .add(egui::TextEdit::singleline(&mut r.path).desired_width(220.0).font(egui::TextStyle::Monospace))
-                .changed();
-            match &resolved {
-                Some((_, ty)) => ui.label(ty.name()),
-                None if compiled.is_some() => ui.label(RichText::new("introuvable").color(RED)),
-                None => ui.label(""),
-            };
-            match &resolved {
-                Some((slot, ty)) if online => {
-                    ui.horizontal(|ui| {
-                        if r.force {
-                            ui.label(RichText::new("F").strong().color(Color32::WHITE).background_color(RED));
-                        }
-                        value_label(ui, app.values.get(slot).copied(), ty);
-                    });
-                }
-                _ => {
-                    ui.label("");
-                }
-            }
-            let valid = match &resolved {
-                Some((_, ty)) => r.modify.is_empty() || parse_value(&r.modify, ty).is_some(),
-                None => true,
-            };
-            let mut edit =
-                egui::TextEdit::singleline(&mut r.modify).desired_width(120.0).font(egui::TextStyle::Monospace);
-            if !valid {
-                edit = edit.text_color(RED);
-            }
-            changed |= ui.add(edit).changed();
-            let mut f = r.force;
-            if ui.add_enabled(online && resolved.is_some(), egui::Checkbox::without_text(&mut f)).changed() {
-                actions.push((k, f));
-            }
-            if ui.small_button("🗑").clicked() {
-                remove = Some(k);
+    theme::card(ui, |ui| {
+        ui.set_width(ui.available_width());
+        white_fields(ui);
+        egui::Grid::new(("watch", i)).num_columns(6).spacing(vec2(14.0, 8.0)).striped(false).show(ui, |ui| {
+            for h in ["Variable", "Type", "Valeur", "Valeur de modification", "Forcer", ""] {
+                caption(ui, h);
             }
             ui.end_row();
-        }
+            let compiled = app.compiled.as_ref();
+            for (k, r) in app.project.watch_tables[i].rows.iter_mut().enumerate() {
+                let resolved = compiled.and_then(|cp| cp.resolve(&r.path));
+                changed |= ui
+                    .add_sized([250.0, 26.0], egui::TextEdit::singleline(&mut r.path).font(egui::TextStyle::Monospace))
+                    .changed();
+                match &resolved {
+                    Some((_, ty)) => ui.label(soft(ui, ty.name())),
+                    None if compiled.is_some() => ui.label(RichText::new("introuvable").color(c.red)),
+                    None => ui.label(""),
+                };
+                match &resolved {
+                    Some((slot, ty)) if online => {
+                        ui.horizontal(|ui| {
+                            if r.force {
+                                theme::chip(ui, "F", c.red).on_hover_text("Valeur forcée");
+                            }
+                            value_label(ui, app.values.get(slot).copied(), ty);
+                        });
+                    }
+                    _ => {
+                        ui.label("");
+                    }
+                }
+                let valid = match &resolved {
+                    Some((_, ty)) => r.modify.is_empty() || parse_value(&r.modify, ty).is_some(),
+                    None => true,
+                };
+                let mut edit =
+                    egui::TextEdit::singleline(&mut r.modify).font(egui::TextStyle::Monospace).hint_text("valeur");
+                if !valid {
+                    edit = edit.text_color(c.red);
+                }
+                changed |= ui.add_sized([150.0, 26.0], edit).changed();
+                let mut f = r.force;
+                if ui.add_enabled_ui(online && resolved.is_some(), |ui| theme::switch(ui, &mut f)).inner {
+                    actions.push((k, f));
+                }
+                if theme::ghost_icon(ui, icon::TRASH, "Retirer la ligne").clicked() {
+                    remove = Some(k);
+                }
+                ui.end_row();
+            }
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut app.new_watch_row)
+                    .hint_text("Ajouter une variable : \"Moteur\", Main.tempo.ET, Main.tab[2]…")
+                    .desired_width(360.0),
+            );
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (theme::ghost_icon(ui, icon::PLUS, "Ajouter").clicked() || enter) && !app.new_watch_row.trim().is_empty()
+            {
+                let path = std::mem::take(&mut app.new_watch_row);
+                app.project.watch_tables[i].rows.push(WatchRow { path: path.trim().into(), ..Default::default() });
+                changed = true;
+            }
+            if let Some(cp) = &app.compiled {
+                ui.menu_button(soft(ui, "Choisir dans la liste…"), |ui| {
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        for s in cp.symbols.iter().filter(|s| s.ty.is_scalar()) {
+                            if ui.button(&s.path).clicked() {
+                                app.project.watch_tables[i]
+                                    .rows
+                                    .push(WatchRow { path: s.path.clone(), ..Default::default() });
+                                changed = true;
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                });
+            }
+        });
     });
     for (k, f) in actions {
         set_force(app, i, k, f);
@@ -409,36 +498,6 @@ pub fn watch_view(app: &mut App, ui: &mut Ui, i: usize) {
         app.project.watch_tables[i].rows.remove(k);
         changed = true;
     }
-
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        let r = ui.add(
-            egui::TextEdit::singleline(&mut app.new_watch_row)
-                .hint_text("Ajouter : \"Variable\", Main.tempo.ET, Main.tab[2]…")
-                .desired_width(320.0),
-        );
-        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if (ui.button("➕").clicked() || enter) && !app.new_watch_row.trim().is_empty() {
-            let path = std::mem::take(&mut app.new_watch_row);
-            app.project.watch_tables[i].rows.push(WatchRow { path: path.trim().into(), ..Default::default() });
-            changed = true;
-        }
-        if let Some(c) = &app.compiled {
-            ui.menu_button("Choisir…", |ui| {
-                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                    for s in c.symbols.iter().filter(|s| s.ty.is_scalar()) {
-                        if ui.button(&s.path).clicked() {
-                            app.project.watch_tables[i]
-                                .rows
-                                .push(WatchRow { path: s.path.clone(), ..Default::default() });
-                            changed = true;
-                            ui.close_menu();
-                        }
-                    }
-                });
-            });
-        }
-    });
     if changed {
         app.touch();
     }
@@ -495,18 +554,29 @@ fn set_force(app: &mut App, i: usize, k: usize, force: bool) {
 }
 
 // ---------------------------------------------------------------------------
-// Inspecteur
+// Tiroir du bas
 
 pub fn inspector(app: &mut App, ui: &mut Ui) {
     ui.horizontal(|ui| {
         let errors = app.diags.iter().filter(|d| d.severity == Severity::Error).count();
-        let info = if errors > 0 { format!("ℹ Info ({errors} erreur(s))") } else { "ℹ Info".into() };
-        ui.selectable_value(&mut app.bottom, BottomTab::Info, info);
-        ui.selectable_value(&mut app.bottom, BottomTab::Diagnostic, "🩺 Diagnostic");
-        ui.selectable_value(&mut app.bottom, BottomTab::Simulation, "🧪 Simulation");
-        ui.selectable_value(&mut app.bottom, BottomTab::Journal, "📜 Journal");
+        let messages = if errors > 0 { format!("Messages · {errors}") } else { "Messages".into() };
+        theme::segmented(
+            ui,
+            &mut app.bottom,
+            &[
+                (BottomTab::Info, messages.as_str()),
+                (BottomTab::Diagnostic, "Diagnostic"),
+                (BottomTab::Simulation, "Simulation"),
+                (BottomTab::Journal, "Journal"),
+            ],
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if theme::ghost_icon(ui, icon::X, "Masquer").clicked() {
+                app.drawer = false;
+            }
+        });
     });
-    ui.separator();
+    ui.add_space(8.0);
     match app.bottom {
         BottomTab::Info => info_tab(app, ui),
         BottomTab::Diagnostic => diagnostic_tab(app, ui),
@@ -514,7 +584,7 @@ pub fn inspector(app: &mut App, ui: &mut Ui) {
         BottomTab::Journal => {
             egui::ScrollArea::vertical().auto_shrink([false; 2]).stick_to_bottom(true).show(ui, |ui| {
                 for l in &app.journal {
-                    ui.label(RichText::new(l).monospace().small());
+                    ui.label(soft(ui, l).monospace().size(12.5));
                 }
             });
         }
@@ -522,32 +592,36 @@ pub fn inspector(app: &mut App, ui: &mut Ui) {
 }
 
 fn info_tab(app: &mut App, ui: &mut Ui) {
+    let c = theme::colors(ui);
     if app.diags.is_empty() {
-        ui.label(RichText::new("Aucun message. Compilez avec Ctrl+B.").weak());
+        ui.label(soft(ui, "Aucun message. Compilez avec Ctrl+B."));
         return;
     }
     let mut jump = None;
     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-        egui::Grid::new("diags").striped(true).num_columns(4).spacing(vec2(12.0, 3.0)).show(ui, |ui| {
-            for d in &app.diags {
-                let (icon, color) = match d.severity {
-                    Severity::Error => ("⛔", RED),
-                    Severity::Warning => ("⚠", ORANGE),
-                    Severity::Info => ("✔", GREEN),
-                };
-                ui.label(RichText::new(icon).color(color));
-                ui.label(&d.block);
-                ui.label(if d.pos.line > 0 { format!("ligne {}", d.pos.line) } else { String::new() });
-                let r = ui.add(egui::Label::new(&d.msg).sense(Sense::click()));
-                if r.clicked() {
-                    jump = Some(d.clone());
-                }
-                if d.pos.line > 0 {
-                    r.on_hover_text("Cliquer pour aller à la ligne");
-                }
-                ui.end_row();
+        for d in &app.diags {
+            let (ic, color) = match d.severity {
+                Severity::Error => (icon::ALERT, c.red),
+                Severity::Warning => (icon::WARNING, c.orange),
+                Severity::Info => (icon::CHECK, c.green),
+            };
+            let r = ui
+                .horizontal(|ui| {
+                    ui.label(theme::icon_text(ic, 15.0).color(color));
+                    let place =
+                        if d.pos.line > 0 { format!("{} · ligne {}", d.block, d.pos.line) } else { d.block.clone() };
+                    ui.label(RichText::new(place).font(FontId::new(13.5, theme::medium())));
+                    ui.label(RichText::new(&d.msg).color(c.text));
+                })
+                .response
+                .interact(Sense::click());
+            if r.hovered() {
+                ui.painter().rect_filled(r.rect.expand(2.0), 6.0, c.hover);
             }
-        });
+            if r.clicked() {
+                jump = Some(d.clone());
+            }
+        }
     });
     if let Some(d) = jump {
         if d.block == BLOCK_TAGS {
@@ -562,48 +636,43 @@ fn info_tab(app: &mut App, ui: &mut Ui) {
     }
 }
 
+/// Tuile de statistique : grande valeur, libellé en dessous.
+fn stat(ui: &mut Ui, value: String, label: &str, color: Color32) {
+    theme::card(ui, |ui| {
+        ui.set_min_width(150.0);
+        ui.label(RichText::new(value).font(FontId::new(22.0, theme::semi())).color(color));
+        ui.label(soft(ui, label).size(12.5));
+    });
+}
+
 fn diagnostic_tab(app: &mut App, ui: &mut Ui) {
+    let c = theme::colors(ui);
     let Some(st) = app.status else {
-        ui.label(RichText::new("Hors ligne. Passez en ligne (Ctrl+K) pour lire le diagnostic de la CPU.").weak());
+        ui.label(soft(ui, "Hors ligne. Connectez-vous pour lire le diagnostic de la CPU."));
         return;
     };
-    ui.horizontal_top(|ui| {
-        egui::Grid::new("diag_grid").num_columns(2).spacing(vec2(14.0, 3.0)).show(ui, |ui| {
-            let mode = match Mode::from_u8(st.mode) {
-                Mode::Run => RichText::new("RUN").color(GREEN).strong(),
-                Mode::Stop => RichText::new("STOP").color(ORANGE).strong(),
-                Mode::Fault => RichText::new("DÉFAUT").color(RED).strong(),
-                Mode::NoProgram => RichText::new("aucun programme").weak(),
+    egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+        ui.horizontal_top(|ui| {
+            let (mode, color) = match Mode::from_u8(st.mode) {
+                Mode::Run => ("RUN", c.green),
+                Mode::Stop => ("STOP", c.orange),
+                Mode::Fault => ("DÉFAUT", c.red),
+                Mode::NoProgram => ("vide", c.soft),
             };
-            ui.label("État");
-            ui.label(mode);
-            ui.end_row();
-            if let Some(f) = takt_vm::exec::Fault::from_u8(st.fault) {
-                ui.label("Cause du défaut");
-                ui.label(RichText::new(f.describe()).color(RED));
-                ui.end_row();
-            }
-            ui.label("Cible");
-            ui.label(app.target.as_ref().map(|t| t.name()).unwrap_or_default());
-            ui.end_row();
-            ui.label("Temps de cycle configuré");
-            ui.label(format!("{} µs", st.cycle_us));
-            ui.end_row();
-            ui.label("Pire cas prouvé (compilateur)");
-            ui.label(RichText::new(format!("{} µs", st.wcet_us)).strong());
-            ui.end_row();
-            ui.label("Exécution mesurée min / dernier / max");
-            ui.label(format!("{} / {} / {} µs", st.exec_min_us, st.exec_last_us, st.exec_max_us));
-            ui.end_row();
-            ui.label("Retard max du début de cycle (gigue)");
-            ui.label(format!("{} µs", st.late_max_us));
-            ui.end_row();
-            ui.label("Dépassements du temps de cycle");
-            ui.label(RichText::new(st.overruns.to_string()).color(if st.overruns > 0 { RED } else { GREEN }));
-            ui.end_row();
-            ui.label("Cycles exécutés");
-            ui.label(st.scans.to_string());
-            ui.end_row();
+            let label = takt_vm::exec::Fault::from_u8(st.fault).map(|f| f.describe()).unwrap_or("état de la CPU");
+            stat(ui, mode.into(), label, color);
+            stat(ui, format!("{} µs", st.wcet_us), "pire cas prouvé", c.text);
+            stat(ui, format!("{} µs", st.exec_max_us), &format!("mesuré max (min {} µs)", st.exec_min_us), c.text);
+            stat(ui, format!("{} µs", st.late_max_us), "gigue max du départ", c.text);
+            let over = if st.overruns > 0 { c.red } else { c.green };
+            stat(ui, st.overruns.to_string(), "dépassements", over);
+            theme::card(ui, |ui| {
+                ui.label(soft(ui, "Temps d'exécution, en % du cycle").size(12.5));
+                histogram(ui, &st.hist);
+            });
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
             let mut flags = Vec::new();
             if st.diag & takt_vm::exec::DIAG_DIV0 != 0 {
                 flags.push("division par zéro");
@@ -611,22 +680,14 @@ fn diagnostic_tab(app: &mut App, ui: &mut Ui) {
             if st.diag & takt_vm::exec::DIAG_INDEX != 0 {
                 flags.push("index de tableau hors bornes");
             }
-            ui.label("Avertissements d'exécution");
-            ui.label(if flags.is_empty() { "aucun".to_string() } else { flags.join(", ") });
-            ui.end_row();
-        });
-        ui.add_space(24.0);
-        ui.vertical(|ui| {
-            ui.label(RichText::new("Répartition du temps d'exécution (en % du cycle)").strong());
-            histogram(ui, &st.hist);
-            if app.target.as_mut().is_some_and(|t| t.as_sim().is_some()) {
-                ui.label(
-                    RichText::new("Simulation : temps mesurés sur le PC (Windows), pas représentatifs du RP2350.")
-                        .small()
-                        .weak(),
-                );
+            ui.label(soft(ui, format!("{} cycles exécutés", st.scans)));
+            for f in flags {
+                theme::chip(ui, f, c.orange);
             }
-            if ui.button("Remettre à zéro").clicked() {
+            if app.target.as_mut().is_some_and(|t| t.as_sim().is_some()) {
+                ui.label(soft(ui, "· simulation : temps mesurés sur le PC, pas sur le RP2350").size(12.5));
+            }
+            if theme::ghost_icon(ui, icon::REFRESH, "Remettre les statistiques à zéro").clicked() {
                 app.with_target(|t| target::call(t, proto::RESET_STATS, &[]));
             }
         });
@@ -634,43 +695,44 @@ fn diagnostic_tab(app: &mut App, ui: &mut Ui) {
 }
 
 fn histogram(ui: &mut Ui, hist: &[u32; 8]) {
-    let (rect, _) = ui.allocate_exact_size(vec2(360.0, 110.0), Sense::hover());
+    let c = theme::colors(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(260.0, 64.0), Sense::hover());
     let p = ui.painter_at(rect);
     let max = hist.iter().copied().max().unwrap_or(0).max(1) as f32;
     let w = rect.width() / 8.0;
     for (i, &n) in hist.iter().enumerate() {
-        let h = (n as f32 / max) * (rect.height() - 18.0);
+        let h = ((n as f32 / max) * (rect.height() - 16.0)).max(if n > 0 { 2.0 } else { 0.0 });
         let x = rect.left() + i as f32 * w;
         let bar =
-            egui::Rect::from_min_max(pos2(x + 3.0, rect.bottom() - 16.0 - h), pos2(x + w - 3.0, rect.bottom() - 16.0));
-        let color = if i >= 6 { ORANGE } else { ACCENT };
-        p.rect_filled(bar, 2.0, color);
+            egui::Rect::from_min_max(pos2(x + 3.0, rect.bottom() - 14.0 - h), pos2(x + w - 3.0, rect.bottom() - 14.0));
+        p.rect_filled(bar, 3.0, if i >= 6 { c.orange } else { c.accent });
         p.text(
-            pos2(x + w / 2.0, rect.bottom() - 8.0),
+            pos2(x + w / 2.0, rect.bottom() - 5.0),
             egui::Align2::CENTER_CENTER,
-            format!("{}%", (i + 1) * 125 / 10),
-            egui::FontId::proportional(9.5),
-            ui.visuals().weak_text_color(),
+            format!("{}", (i + 1) * 125 / 10),
+            FontId::proportional(9.5),
+            c.soft,
         );
     }
 }
 
-/// Panneau PLCSIM : boutons pour les entrées, voyants pour les sorties.
+/// Simulateur : interrupteurs pour les entrées, voyants pour les sorties.
 fn simulation_tab(app: &mut App, ui: &mut Ui) {
+    let c = theme::colors(ui);
     let Some(sim) = app.target.as_mut().and_then(|t| t.as_sim()) else {
-        ui.label(RichText::new("Sélectionnez la cible « PLCSIM » et passez en ligne pour simuler l'automate.").weak());
+        ui.label(soft(ui, "Choisissez « Simulateur PLCSIM » en bas de la barre latérale et connectez-vous."));
         return;
     };
     let shared = sim.shared.clone();
     let io = sim.io();
     if io.is_empty() {
-        ui.label(RichText::new("Aucune entrée/sortie : chargez un programme (Ctrl+L).").weak());
+        ui.label(soft(ui, "Aucune entrée/sortie : chargez d'abord le programme (Ctrl+L)."));
         return;
     }
     let names: Vec<(u16, String)> = app
         .compiled
         .as_ref()
-        .map(|c| c.symbols.iter().filter(|s| s.io.is_some()).map(|s| (s.slot, s.path.clone())).collect())
+        .map(|cp| cp.symbols.iter().filter(|s| s.io.is_some()).map(|s| (s.slot, s.path.clone())).collect())
         .unwrap_or_default();
     let name_of = |slot: u16, pin: u8| {
         names.iter().find(|(s, _)| *s == slot).map(|(_, n)| n.clone()).unwrap_or(format!("GP{pin}"))
@@ -678,54 +740,66 @@ fn simulation_tab(app: &mut App, ui: &mut Ui) {
     let mut g = shared.lock().unwrap();
     egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
         ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.label(RichText::new("Entrées").strong());
-                for e in io.iter().filter(|e| e.kind.is_input()) {
-                    let v = g.inputs.entry(e.pin).or_insert(0);
-                    ui.horizontal(|ui| {
-                        if e.kind == IoKind::Di {
-                            let on = *v != 0;
-                            let btn = egui::Button::new(
-                                RichText::new(if on { "1" } else { "0" }).monospace().color(Color32::WHITE),
-                            )
-                            .fill(if on { GREEN } else { Color32::from_gray(150) })
-                            .min_size(vec2(26.0, 18.0));
-                            if ui.add(btn).on_hover_text("Cliquer pour basculer").clicked() {
-                                *v = (!on) as u32;
-                            }
-                        } else {
-                            let mut x = *v as i32;
-                            if ui.add(egui::Slider::new(&mut x, 0..=27648).show_value(true)).changed() {
-                                *v = x as u32;
-                            }
-                        }
-                        ui.label(name_of(e.slot, e.pin));
-                    });
-                }
+            theme::card(ui, |ui| {
+                ui.set_width(560.0);
+                caption(ui, "Entrées");
+                ui.horizontal_wrapped(|ui| {
+                    for e in io.iter().filter(|e| e.kind.is_input()) {
+                        let v = g.inputs.entry(e.pin).or_insert(0);
+                        let w = if e.kind == IoKind::Di { 176.0 } else { 360.0 };
+                        ui.allocate_ui_with_layout(
+                            vec2(w, 28.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                if e.kind == IoKind::Di {
+                                    let mut on = *v != 0;
+                                    if theme::switch(ui, &mut on) {
+                                        *v = on as u32;
+                                    }
+                                } else {
+                                    let mut x = *v as i32;
+                                    if ui.add(egui::Slider::new(&mut x, 0..=27648).show_value(true)).changed() {
+                                        *v = x as u32;
+                                    }
+                                }
+                                ui.label(name_of(e.slot, e.pin));
+                                ui.set_min_width(w);
+                            },
+                        );
+                    }
+                });
             });
-            ui.add_space(30.0);
-            ui.vertical(|ui| {
-                ui.label(RichText::new("Sorties").strong());
-                for e in io.iter().filter(|e| !e.kind.is_input()) {
-                    let v = g.outputs.get(&e.pin).copied().unwrap_or(0);
-                    ui.horizontal(|ui| {
-                        if e.kind == IoKind::Dq {
-                            let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
-                            ui.painter().circle_filled(
-                                r.center(),
-                                7.0,
-                                if v != 0 { ORANGE } else { Color32::from_gray(170) },
-                            );
-                        } else {
-                            ui.add(
-                                egui::ProgressBar::new(v as i32 as f32 / 27648.0)
-                                    .desired_width(120.0)
-                                    .text(format!("{}", v as i32)),
-                            );
-                        }
-                        ui.label(name_of(e.slot, e.pin));
-                    });
-                }
+            ui.add_space(12.0);
+            theme::card(ui, |ui| {
+                ui.set_width(400.0);
+                caption(ui, "Sorties");
+                ui.horizontal_wrapped(|ui| {
+                    for e in io.iter().filter(|e| !e.kind.is_input()) {
+                        let v = g.outputs.get(&e.pin).copied().unwrap_or(0);
+                        ui.allocate_ui_with_layout(
+                            vec2(190.0, 28.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                if e.kind == IoKind::Dq {
+                                    let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+                                    if v != 0 {
+                                        ui.painter().circle_filled(r.center(), 9.0, c.orange.gamma_multiply(0.25));
+                                    }
+                                    ui.painter().circle_filled(
+                                        r.center(),
+                                        6.0,
+                                        if v != 0 { c.orange } else { c.very_soft },
+                                    );
+                                } else {
+                                    slim_bar(ui, v as i32 as f32 / 27648.0, c.accent, 120.0);
+                                    ui.label(soft(ui, format!("{}", v as i32)));
+                                }
+                                ui.label(name_of(e.slot, e.pin));
+                                ui.set_min_width(190.0);
+                            },
+                        );
+                    }
+                });
             });
         });
     });

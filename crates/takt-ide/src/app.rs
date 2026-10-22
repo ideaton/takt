@@ -1,10 +1,11 @@
 //! Fenêtre principale : état du projet, actions (compiler, charger, en ligne)
-//! et disposition façon TIA Portal.
+//! et disposition épurée façon Sura Novi (barre latérale, titre de page, tiroir).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::theme::{self, icon};
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText};
 use takt_compiler::ast::PouKind;
 use takt_compiler::project::{Block, Project, WatchTable};
@@ -18,12 +19,6 @@ use crate::target::{self, SerialTarget, SimTarget, Target};
 use crate::views;
 
 pub const EXAMPLE: &str = include_str!("../../../examples/convoyeur.takt");
-
-/// Couleur « pétrole » de l'interface.
-pub const ACCENT: Color32 = Color32::from_rgb(0, 128, 128);
-pub const GREEN: Color32 = Color32::from_rgb(0, 160, 70);
-pub const ORANGE: Color32 = Color32::from_rgb(230, 140, 0);
-pub const RED: Color32 = Color32::from_rgb(210, 40, 40);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum View {
@@ -69,7 +64,6 @@ pub struct App {
     /// Incrémenté à chaque modification du projet.
     pub rev: u64,
     saved_rev: u64,
-    pub tabs: Vec<View>,
     pub view: Option<View>,
     pub compiled: Option<Compiled>,
     pub compiled_rev: Option<u64>,
@@ -88,6 +82,14 @@ pub struct App {
     pub goto: Option<(usize, u32)>,
     kinds: (u64, Vec<Option<PouKind>>),
     pub new_watch_row: String,
+    pub dark: bool,
+    /// Tiroir du bas (messages, diagnostic, simulation, journal) ouvert.
+    pub drawer: bool,
+    pub show_instructions: bool,
+    logo: Option<egui::TextureHandle>,
+    /// Les polices installées par `theme::install` ne sont prises en compte
+    /// qu'à l'image suivante : la première image n'affiche rien.
+    first_frame: bool,
 }
 
 impl App {
@@ -96,13 +98,12 @@ impl App {
     }
 
     pub fn create(ctx: &egui::Context, path: Option<PathBuf>) -> App {
-        setup_style(ctx);
+        theme::install(ctx);
         let mut app = App {
             project: serde_json_example(),
             path: None,
             rev: 1,
             saved_rev: 1,
-            tabs: vec![View::Block(0)],
             view: Some(View::Block(0)),
             compiled: None,
             compiled_rev: None,
@@ -121,6 +122,11 @@ impl App {
             goto: None,
             kinds: (0, Vec::new()),
             new_watch_row: String::new(),
+            dark: false,
+            drawer: true,
+            show_instructions: true,
+            logo: None,
+            first_frame: true,
         };
         app.log("Takt Studio prêt. Projet d'exemple « Convoyeur » chargé.");
         if let Some(p) = path {
@@ -177,7 +183,6 @@ impl App {
         self.compiled = None;
         self.compiled_rev = None;
         self.diags.clear();
-        self.tabs.clear();
         self.view = None;
         if !self.project.blocks.is_empty() {
             self.open(View::Block(0));
@@ -242,30 +247,7 @@ impl App {
     // ---------- vues ----------
 
     pub fn open(&mut self, v: View) {
-        if !self.tabs.contains(&v) {
-            self.tabs.push(v);
-        }
         self.view = Some(v);
-    }
-
-    fn close_tab(&mut self, v: View) {
-        self.tabs.retain(|t| *t != v);
-        if self.view == Some(v) {
-            self.view = self.tabs.last().copied();
-        }
-    }
-
-    pub fn view_title(&mut self, v: View) -> String {
-        match v {
-            View::Device => format!("{} [{}]", self.project.device.name, views::board_name(&self.project.device.board)),
-            View::Tags => "Variables API".into(),
-            View::Block(i) => {
-                let kind = self.block_kind(i);
-                let b = &self.project.blocks[i];
-                format!("{} [{}]", b.name, kind_short(kind))
-            }
-            View::Watch(i) => self.project.watch_tables[i].name.clone(),
-        }
     }
 
     pub fn add_block(&mut self, name: &str, kind: PouKind) {
@@ -287,17 +269,9 @@ impl App {
 
     fn delete_block(&mut self, i: usize) {
         self.project.blocks.remove(i);
-        self.tabs.retain(|t| *t != View::Block(i));
-        for t in self.tabs.iter_mut() {
-            if let View::Block(k) = t
-                && *k > i
-            {
-                *k -= 1;
-            }
-        }
         if let Some(View::Block(k)) = self.view {
             if k == i {
-                self.view = self.tabs.last().copied();
+                self.view = (!self.project.blocks.is_empty()).then_some(View::Block(0));
             } else if k > i {
                 self.view = Some(View::Block(k - 1));
             }
@@ -322,6 +296,9 @@ impl App {
         self.compiled = out.compiled;
         self.compiled_rev = Some(self.rev);
         self.bottom = BottomTab::Info;
+        if self.diags.iter().any(|d| d.severity != Severity::Info) {
+            self.drawer = true;
+        }
         match &self.compiled {
             Some(c) => {
                 let msg = format!(
@@ -355,6 +332,7 @@ impl App {
                 self.log(format!("Liaison en ligne établie avec {}.", t.name()));
                 if matches!(self.conn, Conn::Sim) {
                     self.bottom = BottomTab::Simulation;
+                    self.drawer = true;
                 }
                 self.target = Some(t);
                 self.last_poll = Instant::now() - Duration::from_secs(1);
@@ -560,281 +538,358 @@ impl App {
         }
     }
 
-    fn menu(&mut self, ui: &mut egui::Ui) {
-        egui::menu::bar(ui, |ui| {
-            ui.menu_button("Projet", |ui| {
-                if ui.button("Nouveau").clicked() {
-                    self.request(Pending::New);
-                    ui.close_menu();
-                }
-                if ui.button("Ouvrir…").clicked() {
-                    self.request(Pending::Open);
-                    ui.close_menu();
-                }
-                if ui.button("Ouvrir l'exemple « Convoyeur »").clicked() {
-                    self.request(Pending::Example);
-                    ui.close_menu();
-                }
-                ui.separator();
-                if ui.add(egui::Button::new("Enregistrer").shortcut_text("Ctrl+S")).clicked() {
-                    self.save(false);
-                    ui.close_menu();
-                }
-                if ui.button("Enregistrer sous…").clicked() {
-                    self.save(true);
-                    ui.close_menu();
-                }
-            });
-            ui.menu_button("Édition", |ui| {
-                if ui.button("Ajouter un bloc…").clicked() {
-                    self.modal = Some(Modal::NewBlock { name: String::new(), kind: PouKind::FunctionBlock });
-                    ui.close_menu();
-                }
-                if ui.button("Ajouter une table de visualisation").clicked() {
-                    self.add_watch_table();
-                    ui.close_menu();
-                }
-                if ui.add(egui::Button::new("Compiler").shortcut_text("Ctrl+B")).clicked() {
-                    self.compile();
-                    ui.close_menu();
-                }
-            });
-            ui.menu_button("En ligne", |ui| {
-                if ui.add(egui::Button::new("Charger dans l'appareil").shortcut_text("Ctrl+L")).clicked() {
-                    self.download();
-                    ui.close_menu();
-                }
-                if ui.add(egui::Button::new("Liaison en ligne").shortcut_text("Ctrl+K")).clicked() {
-                    self.connect();
-                    ui.close_menu();
-                }
-                if ui.add(egui::Button::new("Liaison hors ligne").shortcut_text("Ctrl+M")).clicked() {
-                    self.disconnect();
-                    ui.close_menu();
-                }
-                ui.separator();
-                if ui.button("Démarrer la CPU (RUN)").clicked() {
-                    self.run();
-                    ui.close_menu();
-                }
-                if ui.button("Arrêter la CPU (STOP)").clicked() {
-                    self.stop();
-                    ui.close_menu();
-                }
-                if ui.button("Remettre à zéro les statistiques").clicked() {
-                    self.with_target(|t| target::call(t, proto::RESET_STATS, &[]));
-                    ui.close_menu();
-                }
-            });
-            ui.menu_button("Affichage", |ui| {
-                let mut dark = ui.ctx().style().visuals.dark_mode;
-                if ui.checkbox(&mut dark, "Thème sombre").changed() {
-                    let ctx = ui.ctx().clone();
-                    ctx.set_visuals(if dark { egui::Visuals::dark() } else { egui::Visuals::light() });
-                    setup_style(&ctx);
-                }
-            });
-            ui.menu_button("Aide", |ui| {
-                if ui.button("À propos de Takt Studio").clicked() {
-                    self.modal = Some(Modal::About);
-                    ui.close_menu();
-                }
-            });
-        });
-    }
-
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            let b = |ui: &mut egui::Ui, icon: &str, tip: &str| {
-                ui.add(egui::Button::new(RichText::new(icon).size(16.0))).on_hover_text(tip)
-            };
-            if b(ui, "🗋", "Nouveau projet").clicked() {
-                self.request(Pending::New);
-            }
-            if b(ui, "📂", "Ouvrir un projet").clicked() {
-                self.request(Pending::Open);
-            }
-            if b(ui, "💾", "Enregistrer (Ctrl+S)").clicked() {
-                self.save(false);
-            }
-            ui.separator();
-            if b(ui, "⚙ Compiler", "Compiler et vérifier le temps de cycle (Ctrl+B)").clicked() {
-                self.compile();
-            }
-            if b(ui, "⬇ Charger", "Charger dans l'appareil (Ctrl+L)").clicked() {
-                self.download();
-            }
-            ui.separator();
-            ui.label("Cible :");
-            let label = match &self.conn {
-                Conn::Sim => "PLCSIM (simulation)".to_string(),
-                Conn::Serial(p) => format!("RP2350 sur {p}"),
-            };
-            ui.add_enabled_ui(!self.online(), |ui| {
-                egui::ComboBox::from_id_salt("conn").selected_text(label).width(170.0).show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.conn, Conn::Sim, "PLCSIM (simulation)");
-                    for p in self.ports.clone() {
-                        ui.selectable_value(&mut self.conn, Conn::Serial(p.clone()), format!("RP2350 sur {p}"));
-                    }
-                    if ui.button("⟳ Rechercher les ports").clicked() {
-                        self.ports = SerialTarget::ports();
-                    }
-                });
-            });
-            if self.online() {
-                if b(ui, "✂ Hors ligne", "Liaison hors ligne (Ctrl+M)").clicked() {
-                    self.disconnect();
-                }
-            } else if b(ui, "🔗 En ligne", "Liaison en ligne (Ctrl+K)").clicked() {
-                self.connect();
-            }
-            ui.add_enabled_ui(self.online(), |ui| {
-                if b(ui, "▶", "Démarrer la CPU (RUN)").clicked() {
-                    self.run();
-                }
-                if b(ui, "■", "Arrêter la CPU (STOP)").clicked() {
-                    self.stop();
-                }
-            });
-            let glasses = if self.monitor {
-                RichText::new("👓 Visualisation").color(Color32::WHITE)
-            } else {
-                RichText::new("👓 Visualisation")
-            };
-            let btn = egui::Button::new(glasses).fill(if self.monitor {
-                ACCENT
-            } else {
-                ui.visuals().widgets.inactive.weak_bg_fill
-            });
-            if ui.add(btn).on_hover_text("Activer/désactiver la visualisation (Ctrl+T)").clicked() {
-                self.toggle_monitor();
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.cpu_badges(ui);
-            });
-        });
-    }
-
-    fn cpu_badges(&mut self, ui: &mut egui::Ui) {
-        let badge = |ui: &mut egui::Ui, text: &str, color: Color32| {
-            egui::Frame::new().fill(color).corner_radius(3.0).inner_margin(egui::Margin::symmetric(6, 2)).show(
-                ui,
-                |ui| {
-                    ui.label(RichText::new(text).color(Color32::WHITE).strong());
-                },
-            );
+    /// Menu « … » du projet, en bas du titre de la barre latérale.
+    fn project_menu(&mut self, ui: &mut egui::Ui) {
+        let item = |ui: &mut egui::Ui, ic: char, label: &str, shortcut: &str| {
+            let text =
+                theme::rich(&format!("{ic}   {label}"), 14.0, egui::FontFamily::Proportional, theme::colors(ui).text);
+            ui.add(egui::Button::new(text).frame(false).shortcut_text(shortcut).min_size(egui::vec2(220.0, 28.0)))
+                .clicked()
         };
-        let Some(st) = &self.status else {
-            badge(ui, "HORS LIGNE", Color32::from_gray(140));
-            return;
-        };
-        if st.n_forces > 0 {
-            badge(ui, "FORCE", RED);
+        if item(ui, icon::FILE_PLUS, "Nouveau projet", "") {
+            self.request(Pending::New);
+            ui.close_menu();
         }
-        match self.program_identical() {
-            Some(true) => badge(ui, "✔ identique", GREEN),
-            _ => badge(ui, "≠ différent", ORANGE),
+        if item(ui, icon::FOLDER, "Ouvrir…", "") {
+            self.request(Pending::Open);
+            ui.close_menu();
         }
-        let (text, color) = match Mode::from_u8(st.mode) {
-            Mode::Run => ("RUN", GREEN),
-            Mode::Stop => ("STOP", ORANGE),
-            Mode::Fault => ("DÉFAUT", RED),
-            Mode::NoProgram => ("VIDE", Color32::from_gray(140)),
-        };
-        badge(ui, text, color);
-    }
-
-    fn navigator(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.label(RichText::new("Navigateur du projet").strong().color(ACCENT));
+        if item(ui, icon::BOOK, "Exemple « Convoyeur »", "") {
+            self.request(Pending::Example);
+            ui.close_menu();
+        }
         ui.separator();
-        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-            let root = format!("📁 {}", self.project.name);
-            egui::CollapsingHeader::new(root).default_open(true).show(ui, |ui| {
-                let dev = format!("🖥 {} [{}]", self.project.device.name, views::board_name(&self.project.device.board));
-                egui::CollapsingHeader::new(dev).default_open(true).show(ui, |ui| {
-                    if ui.selectable_label(self.view == Some(View::Device), "⚙ Configuration de l'appareil").clicked()
-                    {
-                        self.open(View::Device);
-                    }
-                    egui::CollapsingHeader::new("📂 Blocs de programme").default_open(true).show(ui, |ui| {
-                        if ui.selectable_label(false, "➕ Ajouter nouveau bloc").clicked() {
-                            self.modal = Some(Modal::NewBlock { name: String::new(), kind: PouKind::FunctionBlock });
-                        }
-                        for i in 0..self.project.blocks.len() {
-                            let kind = self.block_kind(i);
-                            let has_err = self
-                                .diags
-                                .iter()
-                                .any(|d| d.severity == Severity::Error && d.block == self.project.blocks[i].name);
-                            let icon = match kind {
-                                Some(PouKind::Program) => "🟦",
-                                Some(PouKind::FunctionBlock) => "🟩",
-                                Some(PouKind::Function) => "🟨",
-                                None => "⬜",
-                            };
-                            let mut text =
-                                RichText::new(format!("{icon} {} [{}]", self.project.blocks[i].name, kind_short(kind)));
-                            if has_err {
-                                text = text.color(RED);
-                            }
-                            let r = ui.selectable_label(self.view == Some(View::Block(i)), text);
-                            if r.clicked() {
-                                self.open(View::Block(i));
-                            }
-                            r.context_menu(|ui| {
-                                if ui.button("Supprimer").clicked() {
-                                    self.modal = Some(Modal::DeleteBlock(i));
-                                    ui.close_menu();
-                                }
-                            });
-                        }
-                    });
-                    egui::CollapsingHeader::new("📂 Variables API").default_open(true).show(ui, |ui| {
-                        if ui
-                            .selectable_label(self.view == Some(View::Tags), "📋 Table de variables standard")
-                            .clicked()
-                        {
-                            self.open(View::Tags);
-                        }
-                    });
-                    egui::CollapsingHeader::new("📂 Tables de visualisation et de forçage").default_open(true).show(
-                        ui,
-                        |ui| {
-                            if ui.selectable_label(false, "➕ Ajouter une table").clicked() {
-                                self.add_watch_table();
-                            }
-                            for i in 0..self.project.watch_tables.len() {
-                                let name = format!("👁 {}", self.project.watch_tables[i].name);
-                                if ui.selectable_label(self.view == Some(View::Watch(i)), name).clicked() {
-                                    self.open(View::Watch(i));
-                                }
-                            }
-                        },
-                    );
-                });
+        if item(ui, icon::SAVE, "Enregistrer", "Ctrl+S") {
+            self.save(false);
+            ui.close_menu();
+        }
+        if item(ui, icon::SAVE, "Enregistrer sous…", "") {
+            self.save(true);
+            ui.close_menu();
+        }
+        ui.separator();
+        let (ic, label) = if self.dark { (icon::SUN, "Thème clair") } else { (icon::MOON, "Thème sombre") };
+        if item(ui, ic, label, "") {
+            self.dark = !self.dark;
+            theme::apply(ui.ctx(), self.dark);
+            ui.close_menu();
+        }
+        if item(ui, icon::INFO, "À propos de Takt Studio", "") {
+            self.modal = Some(Modal::About);
+            ui.close_menu();
+        }
+    }
+
+    fn sidebar(&mut self, ui: &mut egui::Ui) {
+        let c = theme::colors(ui);
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            let logo = self.logo.get_or_insert_with(|| theme::logo_texture(ui.ctx())).clone();
+            ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(28.0, 28.0)).corner_radius(7.0));
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new("Takt Studio").font(egui::FontId::new(17.0, theme::semi())).color(c.text));
+                let dirty = if self.dirty() { " ·  modifié" } else { "" };
+                ui.label(RichText::new(format!("{}{dirty}", self.project.name)).size(12.0).color(c.soft));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button(theme::icon_text(icon::MORE, 15.0).color(c.soft), |ui| self.project_menu(ui))
+                    .response
+                    .on_hover_text("Projet");
             });
         });
+        ui.add_space(14.0);
+
+        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let board = views::board_name(&self.project.device.board);
+            if theme::nav_item(
+                ui,
+                icon::CPU,
+                &self.project.device.name,
+                self.view == Some(View::Device),
+                Some((short_board(board), c.soft)),
+            )
+            .on_hover_text(board)
+            .clicked()
+            {
+                self.open(View::Device);
+            }
+            let tag_count = (self.project.tags.len().to_string(), c.soft);
+            if theme::nav_item(ui, icon::TAG, "Variables API", self.view == Some(View::Tags), Some(tag_count)).clicked()
+            {
+                self.open(View::Tags);
+            }
+
+            if theme::nav_header(ui, "Blocs de programme", Some("Ajouter un bloc")) {
+                self.modal = Some(Modal::NewBlock { name: String::new(), kind: PouKind::FunctionBlock });
+            }
+            for i in 0..self.project.blocks.len() {
+                let kind = self.block_kind(i);
+                let name = self.project.blocks[i].name.clone();
+                let has_err = self.diags.iter().any(|d| d.severity == Severity::Error && d.block == name);
+                let ic = match kind {
+                    Some(PouKind::Program) => icon::CODE,
+                    Some(PouKind::FunctionBlock) => icon::BOX,
+                    _ => icon::FUNCTION,
+                };
+                let trailing =
+                    if has_err { ("●".to_string(), c.red) } else { (kind_short(kind).to_string(), c.soft) };
+                let r = theme::nav_item(ui, ic, &name, self.view == Some(View::Block(i)), Some(trailing));
+                if r.clicked() {
+                    self.open(View::Block(i));
+                }
+                r.context_menu(|ui| {
+                    let text = theme::rich(
+                        &format!("{}   Supprimer", icon::TRASH),
+                        14.0,
+                        egui::FontFamily::Proportional,
+                        c.red,
+                    );
+                    if ui.button(text).clicked() {
+                        self.modal = Some(Modal::DeleteBlock(i));
+                        ui.close_menu();
+                    }
+                });
+            }
+
+            if theme::nav_header(ui, "Visualisation et forçage", Some("Ajouter une table")) {
+                self.add_watch_table();
+            }
+            for i in 0..self.project.watch_tables.len() {
+                let name = self.project.watch_tables[i].name.clone();
+                let n = (self.project.watch_tables[i].rows.len().to_string(), c.soft);
+                if theme::nav_item(ui, icon::EYE, &name, self.view == Some(View::Watch(i)), Some(n)).clicked() {
+                    self.open(View::Watch(i));
+                }
+            }
+        });
+    }
+
+    /// Bas de la barre latérale : cible et état de la liaison.
+    fn connection_box(&mut self, ui: &mut egui::Ui) {
+        let c = theme::colors(ui);
+        egui::Frame::new().fill(c.bg).corner_radius(theme::RADIUS).inner_margin(egui::Margin::same(12)).show(
+            ui,
+            |ui| {
+                ui.set_width(ui.available_width());
+                let (dot, text) = match (&self.status, self.online()) {
+                    (Some(st), true) => match Mode::from_u8(st.mode) {
+                        Mode::Run => (c.green, "En ligne · RUN"),
+                        Mode::Stop => (c.orange, "En ligne · STOP"),
+                        Mode::Fault => (c.red, "En ligne · DÉFAUT"),
+                        Mode::NoProgram => (c.soft, "En ligne · vide"),
+                    },
+                    (_, true) => (c.soft, "Connexion…"),
+                    _ => (c.very_soft, "Hors ligne"),
+                };
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(r.center(), 4.0, dot);
+                    ui.label(RichText::new(text).font(egui::FontId::new(13.5, theme::medium())).color(c.text));
+                });
+                let label = match &self.conn {
+                    Conn::Sim => "Simulateur PLCSIM".to_string(),
+                    Conn::Serial(p) => format!("RP2350 · {p}"),
+                };
+                ui.add_enabled_ui(!self.online(), |ui| {
+                    egui::ComboBox::from_id_salt("conn")
+                        .selected_text(RichText::new(label).size(13.0))
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.conn, Conn::Sim, "Simulateur PLCSIM");
+                            for p in self.ports.clone() {
+                                ui.selectable_value(&mut self.conn, Conn::Serial(p.clone()), format!("RP2350 · {p}"));
+                            }
+                            let text = theme::rich(
+                                &format!("{}  Rechercher les ports", icon::REFRESH),
+                                14.0,
+                                egui::FontFamily::Proportional,
+                                c.text,
+                            );
+                            if ui.button(text).clicked() {
+                                self.ports = SerialTarget::ports();
+                            }
+                        });
+                });
+                ui.add_space(2.0);
+                let w = ui.available_width();
+                if self.online() {
+                    let b = egui::Button::new(theme::rich(
+                        &format!("{}  Se déconnecter", icon::UNPLUG),
+                        14.0,
+                        theme::medium(),
+                        c.text,
+                    ))
+                    .fill(c.group);
+                    if ui.add_sized([w, 30.0], b).on_hover_text("Ctrl+M").clicked() {
+                        self.disconnect();
+                    }
+                } else {
+                    let b = egui::Button::new(theme::rich(
+                        &format!("{}  Se connecter", icon::PLUG),
+                        14.0,
+                        theme::medium(),
+                        Color32::WHITE,
+                    ))
+                    .fill(c.accent);
+                    if ui.add_sized([w, 30.0], b).on_hover_text("Ctrl+K").clicked() {
+                        self.connect();
+                    }
+                }
+            },
+        );
+    }
+
+    /// Pastilles d'état sous le titre : temps de cycle garanti, programme, forçage.
+    fn status_chips(&mut self, ui: &mut egui::Ui) {
+        let c = theme::colors(ui);
+        ui.horizontal_wrapped(|ui| {
+            match (&self.compiled, self.up_to_date()) {
+                (Some(cp), true) => {
+                    let color = if cp.wcet.ratio() > takt_compiler::WCET_WARN_RATIO { c.orange } else { c.green };
+                    theme::chip(
+                        ui,
+                        &format!("{}  cycle garanti {} / {} µs", icon::TIMER, cp.wcet.total_us, cp.wcet.cycle_us),
+                        color,
+                    )
+                    .on_hover_text("Pire cas prouvé par le compilateur, comparé au temps de cycle configuré");
+                }
+                _ if self.diags.iter().any(|d| d.severity == Severity::Error)
+                    && self.compiled_rev == Some(self.rev) =>
+                {
+                    let n = self.diags.iter().filter(|d| d.severity == Severity::Error).count();
+                    if theme::chip(ui, &format!("{}  {n} erreur(s)", icon::ALERT), c.red)
+                        .interact(egui::Sense::click())
+                        .clicked()
+                    {
+                        self.drawer = true;
+                        self.bottom = BottomTab::Info;
+                    }
+                }
+                _ => {
+                    theme::chip(ui, &format!("{}  non compilé", icon::HAMMER), c.soft);
+                }
+            }
+            if let Some(st) = &self.status {
+                match self.program_identical() {
+                    Some(true) => theme::chip(ui, &format!("{}  programme identique", icon::CHECK), c.green),
+                    _ => theme::chip(ui, &format!("{}  programme différent", icon::WARNING), c.orange),
+                };
+                if st.n_forces > 0 {
+                    theme::chip(ui, &format!("{}  {} forçage(s)", icon::ZAP, st.n_forces), c.red);
+                }
+                if st.overruns > 0 {
+                    theme::chip(ui, &format!("{}  {} dépassement(s)", icon::ALERT, st.overruns), c.red);
+                }
+            }
+        });
+    }
+
+    /// En-tête de page : titre, sous-titre, actions.
+    fn header(&mut self, ui: &mut egui::Ui) {
+        let (title, subtitle) = match self.view {
+            Some(View::Device) => (
+                self.project.device.name.clone(),
+                format!(
+                    "{} · cycle de {} µs",
+                    views::board_name(&self.project.device.board),
+                    self.project.device.cycle_us
+                ),
+            ),
+            Some(View::Tags) => ("Variables API".into(), "Entrées, sorties et mémentos de l'automate".into()),
+            Some(View::Block(i)) => {
+                let kind = self.block_kind(i);
+                let sub = match kind {
+                    Some(PouKind::Program) => "Bloc d'organisation · exécuté à chaque cycle",
+                    Some(PouKind::FunctionBlock) => "Bloc fonctionnel · avec mémoire d'instance",
+                    Some(PouKind::Function) => "Fonction · sans mémoire",
+                    None => "Bloc",
+                };
+                (self.project.blocks[i].name.clone(), sub.to_string())
+            }
+            Some(View::Watch(i)) => {
+                (self.project.watch_tables[i].name.clone(), "Visualiser, modifier et forcer des variables".into())
+            }
+            None => (self.project.name.clone(), String::new()),
+        };
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| theme::page_title(ui, &title, &subtitle));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::primary_button(ui, icon::DOWNLOAD, "Charger")
+                    .on_hover_text("Charger dans l'appareil (Ctrl+L)")
+                    .clicked()
+                {
+                    self.download();
+                }
+                if theme::secondary_button(ui, icon::HAMMER, "Compiler")
+                    .on_hover_text("Compiler et prouver le temps de cycle (Ctrl+B)")
+                    .clicked()
+                {
+                    self.compile();
+                }
+                if self.online() {
+                    let mut mode = self.status.map(|s| Mode::from_u8(s.mode) == Mode::Run).unwrap_or(false);
+                    if theme::segmented(ui, &mut mode, &[(false, "STOP"), (true, "RUN")]) {
+                        if mode { self.run() } else { self.stop() }
+                    }
+                }
+                if theme::toggle_button(ui, icon::EYE, "Visualiser", self.monitor)
+                    .on_hover_text("Valeurs en ligne dans le code (Ctrl+T)")
+                    .clicked()
+                {
+                    self.toggle_monitor();
+                }
+            });
+        });
+        ui.add_space(10.0);
+        self.status_chips(ui);
+        ui.add_space(14.0);
     }
 
     fn instructions_card(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.label(RichText::new("Instructions").strong().color(ACCENT));
-        ui.separator();
+        let c = theme::colors(ui);
         let editing = match self.view {
             Some(View::Block(i)) if !self.monitor => Some(i),
             _ => None,
         };
-        if editing.is_none() {
-            ui.label(RichText::new("Ouvrez un bloc hors visualisation pour insérer des instructions.").weak().small());
-        }
+        ui.add_space(18.0);
+        ui.horizontal(|ui| {
+            theme::section_title(ui, "Instructions");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::ghost_icon(ui, icon::X, "Masquer").clicked() {
+                    self.show_instructions = false;
+                }
+            });
+        });
+        ui.label(
+            RichText::new("Cliquez pour insérer au curseur. Les blocs standard sont déclarés automatiquement.")
+                .size(12.0)
+                .color(c.soft),
+        );
+        ui.add_space(8.0);
         egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
             for g in instructions::CATALOG {
-                egui::CollapsingHeader::new(g.name).default_open(g.name.starts_with("Tempo")).show(ui, |ui| {
+                ui.add_space(6.0);
+                ui.label(RichText::new(g.name).size(12.5).color(c.soft));
+                theme::card(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     for it in g.items {
+                        let (name, rest) = it.label.split_once("  ").unwrap_or((it.label, ""));
                         let r = ui
-                            .add_enabled(editing.is_some(), egui::Button::new(it.label).frame(false))
+                            .add_enabled(
+                                editing.is_some(),
+                                egui::Button::new(
+                                    RichText::new(format!("{name}  "))
+                                        .font(egui::FontId::new(13.5, theme::medium()))
+                                        .color(c.text),
+                                )
+                                .frame(false)
+                                .shortcut_text(RichText::new(rest).size(12.0).color(c.soft))
+                                .min_size(egui::vec2(ui.available_width(), 28.0)),
+                            )
                             .on_hover_text(it.help);
                         if r.clicked()
                             && let Some(i) = editing
@@ -854,37 +909,18 @@ impl App {
                     }
                 });
             }
+            ui.add_space(12.0);
         });
     }
 
     fn central(&mut self, ui: &mut egui::Ui) {
-        // Onglets des éditeurs ouverts
-        ui.horizontal_wrapped(|ui| {
-            for v in self.tabs.clone() {
-                let title = self.view_title(v);
-                let selected = self.view == Some(v);
-                egui::Frame::new()
-                    .fill(if selected { ui.visuals().extreme_bg_color } else { ui.visuals().faint_bg_color })
-                    .stroke(egui::Stroke::new(
-                        1.0_f32,
-                        if selected { ACCENT } else { ui.visuals().widgets.noninteractive.bg_stroke.color },
-                    ))
-                    .inner_margin(egui::Margin::symmetric(6, 2))
-                    .show(ui, |ui| {
-                        if ui.selectable_label(selected, title).clicked() {
-                            self.view = Some(v);
-                        }
-                        if ui.small_button("✕").clicked() {
-                            self.close_tab(v);
-                        }
-                    });
-            }
-        });
-        ui.separator();
+        self.header(ui);
         match self.view {
             None => {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("Ouvrez un élément dans le navigateur du projet.").weak());
+                    ui.label(
+                        RichText::new("Choisissez un élément dans la barre latérale.").color(theme::colors(ui).soft),
+                    );
                 });
             }
             Some(View::Device) => views::device_view(self, ui),
@@ -928,16 +964,12 @@ impl App {
                 Some((takt_compiler::types::format_value(v, &sym.1), state))
             };
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("👓 Visualisation en cours — édition verrouillée (Ctrl+T pour quitter)")
-                        .color(ACCENT),
-                );
-                if self.program_identical() == Some(false) {
-                    ui.label(RichText::new("⚠ programme différent dans l'automate").color(ORANGE));
-                }
+                let text = format!("{}  visualisation en cours · édition verrouillée (Ctrl+T pour quitter)", icon::EYE);
+                theme::chip(ui, &text, theme::colors(ui).accent);
             });
+            ui.add_space(8.0);
             let src = self.project.blocks[i].source.clone();
-            editor::monitor_view(ui, editor_id(i), &src, &lookup);
+            theme::card(ui, |ui| editor::monitor_view(ui, editor_id(i), &src, &lookup));
             return;
         }
         let marks: Vec<LineMark> = self
@@ -953,7 +985,8 @@ impl App {
             }
             _ => None,
         };
-        let changed = editor::code_editor(ui, editor_id(i), &mut self.project.blocks[i].source, &marks, &mut goto);
+        let source = &mut self.project.blocks[i].source;
+        let changed = theme::card(ui, |ui| editor::code_editor(ui, editor_id(i), source, &marks, &mut goto));
         if changed {
             self.touch();
             // Le nom du bloc suit l'en-tête de la source
@@ -1133,6 +1166,10 @@ impl eframe::App for App {
 
 impl App {
     pub fn ui(&mut self, ctx: &egui::Context) {
+        if std::mem::take(&mut self.first_frame) {
+            ctx.request_repaint();
+            return;
+        }
         self.shortcuts(ctx);
         self.poll();
 
@@ -1143,38 +1180,68 @@ impl App {
         );
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
 
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu(ui));
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.add_space(2.0);
-            self.toolbar(ui);
-            ui.add_space(2.0);
-        });
-        egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let last = self.journal.last().cloned().unwrap_or_default();
-                ui.label(RichText::new(last).small());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(c) = &self.compiled {
-                        let color = if c.wcet.ratio() > takt_compiler::WCET_WARN_RATIO { ORANGE } else { GREEN };
-                        ui.label(
-                            RichText::new(format!("⏱ cycle garanti {} / {} µs", c.wcet.total_us, c.wcet.cycle_us))
-                                .small()
-                                .color(color),
-                        );
-                    }
+        let c = if self.dark { theme::DARK } else { theme::LIGHT };
+        egui::SidePanel::left("sidebar")
+            .resizable(false)
+            .exact_width(250.0)
+            .frame(egui::Frame::new().fill(c.bar).inner_margin(egui::Margin::symmetric(10, 0)))
+            .show(ctx, |ui| {
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.add_space(12.0);
+                    self.connection_box(ui);
+                    ui.add_space(6.0);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| self.sidebar(ui));
                 });
             });
+        if self.drawer {
+            egui::TopBottomPanel::bottom("drawer")
+                .resizable(true)
+                .default_height(230.0)
+                .min_height(120.0)
+                .frame(egui::Frame::new().fill(c.bg).inner_margin(egui::Margin {
+                    left: 32,
+                    right: 32,
+                    top: 10,
+                    bottom: 10,
+                }))
+                .show(ctx, |ui| views::inspector(self, ui));
+        }
+        let block_view = matches!(self.view, Some(View::Block(_))) && !self.monitor;
+        if block_view && self.show_instructions {
+            egui::SidePanel::right("instructions")
+                .resizable(false)
+                .exact_width(270.0)
+                .frame(egui::Frame::new().fill(c.bg).inner_margin(egui::Margin {
+                    left: 16,
+                    right: 24,
+                    top: 8,
+                    bottom: 0,
+                }))
+                .show(ctx, |ui| self.instructions_card(ui));
+        }
+        let page =
+            egui::Frame::new().fill(c.bg).inner_margin(egui::Margin { left: 32, right: 32, top: 26, bottom: 12 });
+        egui::CentralPanel::default().frame(page).show(ctx, |ui| {
+            // Boutons pour rouvrir ce qui a été masqué
+            if !self.drawer || (block_view && !self.show_instructions) {
+                egui::Area::new(egui::Id::new("reopen"))
+                    .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-24.0, -16.0))
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            if block_view
+                                && !self.show_instructions
+                                && theme::secondary_button(ui, icon::BLOCKS, "Instructions").clicked()
+                            {
+                                self.show_instructions = true;
+                            }
+                            if !self.drawer && theme::secondary_button(ui, icon::SCROLL, "Messages").clicked() {
+                                self.drawer = true;
+                            }
+                        });
+                    });
+            }
+            self.central(ui);
         });
-        egui::TopBottomPanel::bottom("inspector")
-            .resizable(true)
-            .default_height(200.0)
-            .show(ctx, |ui| views::inspector(self, ui));
-        egui::SidePanel::left("navigator").resizable(true).default_width(250.0).show(ctx, |ui| self.navigator(ui));
-        egui::SidePanel::right("instructions")
-            .resizable(true)
-            .default_width(230.0)
-            .show(ctx, |ui| self.instructions_card(ui));
-        egui::CentralPanel::default().show(ctx, |ui| self.central(ui));
         self.modals(ctx);
 
         if self.online() {
@@ -1201,13 +1268,9 @@ fn serde_json_example() -> Project {
     Project::from_json(EXAMPLE).unwrap_or_else(|_| Project::new_empty("Nouveau projet"))
 }
 
-fn setup_style(ctx: &egui::Context) {
-    ctx.style_mut(|s| {
-        s.visuals.selection.bg_fill = ACCENT;
-        s.visuals.selection.stroke.color = Color32::WHITE;
-        s.visuals.hyperlink_color = ACCENT;
-        s.spacing.item_spacing = egui::vec2(6.0, 4.0);
-    });
+/// « Raspberry Pi Pico 2 » → « Pico 2 », pour la barre latérale.
+fn short_board(name: &str) -> String {
+    name.trim_start_matches("Raspberry Pi ").trim_start_matches("Waveshare ").to_string()
 }
 
 #[cfg(test)]
@@ -1265,5 +1328,65 @@ mod tests {
         assert_eq!(app.program_identical(), Some(false));
         app.disconnect();
         frame(&mut app);
+    }
+
+    /// Captures d'écran de l'interface, rendues hors écran avec wgpu.
+    /// `cargo test -p takt-ide captures -- --ignored` ; images dans `target/captures`.
+    #[test]
+    #[ignore]
+    fn captures() {
+        use egui_kittest::Harness;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/captures");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1440.0, 900.0))
+            .build_state(|ctx, app: &mut Option<App>| app.get_or_insert_with(|| App::create(ctx, None)).ui(ctx), None);
+        let shot = |h: &mut Harness<Option<App>>, name: &str| {
+            for _ in 0..4 {
+                h.run_steps(1);
+            }
+            h.render().expect("rendu").save(dir.join(format!("{name}.png"))).unwrap();
+        };
+        h.run_steps(2);
+        shot(&mut h, "1-editeur");
+        {
+            let app = h.state_mut().as_mut().unwrap();
+            app.compile();
+            app.open(View::Device);
+        }
+        shot(&mut h, "2-appareil");
+        {
+            let app = h.state_mut().as_mut().unwrap();
+            app.download();
+            app.modal = None;
+            app.run();
+            app.open(View::Block(0));
+            app.toggle_monitor();
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        shot(&mut h, "3-visualisation");
+        {
+            let app = h.state_mut().as_mut().unwrap();
+            app.monitor = false;
+            app.open(View::Watch(0));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        shot(&mut h, "4-table");
+        {
+            let app = h.state_mut().as_mut().unwrap();
+            app.open(View::Tags);
+            app.bottom = BottomTab::Diagnostic;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        shot(&mut h, "5-variables-diagnostic");
+        {
+            let app = h.state_mut().as_mut().unwrap();
+            app.disconnect();
+            app.dark = true;
+            app.open(View::Block(1));
+            let ctx = h.ctx.clone();
+            theme::apply(&ctx, true);
+        }
+        shot(&mut h, "6-sombre");
     }
 }

@@ -5,12 +5,14 @@ mod app;
 mod editor;
 mod instructions;
 mod target;
+mod theme;
 mod views;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Takt Studio")
+            .with_icon(std::sync::Arc::new(theme::window_icon()))
             .with_inner_size([1400.0, 860.0])
             .with_min_inner_size([900.0, 560.0]),
         ..Default::default()

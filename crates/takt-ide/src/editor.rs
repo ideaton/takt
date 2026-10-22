@@ -72,27 +72,28 @@ pub struct Palette {
 }
 
 pub fn palette(dark: bool) -> Palette {
+    // Couleurs de Xcode (thèmes « Default Light » et « Default Dark »)
     if dark {
         Palette {
-            text: Color32::from_rgb(220, 220, 220),
-            keyword: Color32::from_rgb(86, 156, 214),
-            ty: Color32::from_rgb(78, 201, 176),
-            comment: Color32::from_rgb(106, 153, 85),
-            global: Color32::from_rgb(214, 157, 133),
-            local: Color32::from_rgb(197, 134, 192),
-            number: Color32::from_rgb(181, 206, 168),
-            line_no: Color32::from_gray(120),
+            text: Color32::from_rgb(223, 223, 224),
+            keyword: Color32::from_rgb(252, 95, 163),
+            ty: Color32::from_rgb(208, 168, 255),
+            comment: Color32::from_rgb(108, 121, 134),
+            global: Color32::from_rgb(252, 106, 93),
+            local: Color32::from_rgb(103, 183, 164),
+            number: Color32::from_rgb(208, 191, 105),
+            line_no: Color32::from_gray(100),
         }
     } else {
         Palette {
-            text: Color32::from_rgb(30, 30, 30),
-            keyword: Color32::from_rgb(0, 0, 192),
-            ty: Color32::from_rgb(0, 112, 112),
-            comment: Color32::from_rgb(0, 128, 0),
-            global: Color32::from_rgb(140, 30, 30),
-            local: Color32::from_rgb(90, 60, 150),
-            number: Color32::from_rgb(9, 134, 88),
-            line_no: Color32::from_gray(140),
+            text: Color32::from_rgb(29, 29, 31),
+            keyword: Color32::from_rgb(173, 61, 164),
+            ty: Color32::from_rgb(112, 61, 170),
+            comment: Color32::from_rgb(93, 108, 121),
+            global: Color32::from_rgb(196, 26, 22),
+            local: Color32::from_rgb(62, 128, 135),
+            number: Color32::from_rgb(39, 42, 216),
+            line_no: Color32::from_gray(170),
         }
     }
 }
@@ -337,46 +338,67 @@ pub fn names_in_line(line: &str) -> Vec<String> {
     out
 }
 
-/// Vue de visualisation : code en lecture seule, valeurs à droite de chaque ligne.
 /// Valeur affichée et état d'un BOOL (pour la pastille verte/grise).
 pub type MonitorValue = (String, Option<bool>);
 
+/// Vue de visualisation : code en lecture seule, valeurs à droite de chaque ligne.
 pub fn monitor_view(ui: &mut Ui, id: Id, source: &str, value_of: &dyn Fn(&str) -> Option<MonitorValue>) {
     let font = FontId::monospace(13.5);
     let pal = palette(ui.visuals().dark_mode);
+    let c = crate::theme::colors(ui);
+    let row_h = ui.fonts(|f| f.row_height(&font)) + 8.0;
+    let lines: Vec<&str> = source.lines().collect();
+    let code_w = lines
+        .iter()
+        .map(|l| ui.fonts(|f| f.layout_no_wrap(l.to_string(), font.clone(), pal.text).size().x))
+        .fold(0.0, f32::max)
+        + 28.0;
+    // Les valeurs doivent rester visibles : la colonne de code est bornée
+    let code_w = code_w.min((ui.available_width() - 420.0).max(320.0));
     egui::ScrollArea::both().id_salt(id.with("monitor")).auto_shrink([false; 2]).show(ui, |ui| {
-        egui::Grid::new(id.with("grid")).num_columns(3).spacing(vec2(10.0, 2.0)).striped(true).show(ui, |ui| {
-            for (n, line) in source.lines().enumerate() {
-                ui.label(RichText::new(format!("{:>4}", n + 1)).font(font.clone()).color(pal.line_no));
-                ui.add(egui::Label::new(highlight(line, &font, &pal)).extend());
-                ui.horizontal(|ui| {
-                    for name in names_in_line(line) {
-                        if let Some((text, state)) = value_of(&name) {
-                            let color = match state {
-                                Some(true) => Color32::from_rgb(0, 150, 60),
-                                Some(false) => Color32::from_gray(130),
-                                None => ui.visuals().text_color(),
-                            };
-                            let label = format!("{} = {text}", name.rsplit('.').next().unwrap_or(&name));
-                            egui::Frame::new()
-                                .fill(ui.visuals().extreme_bg_color)
-                                .corner_radius(3.0)
-                                .inner_margin(egui::Margin::symmetric(4, 0))
-                                .show(ui, |ui| {
-                                    if state.is_some() {
-                                        let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), egui::Sense::hover());
-                                        ui.painter().circle_filled(r.center(), 4.0, color);
-                                    }
-                                    ui.label(RichText::new(label).font(FontId::monospace(12.0)).color(color));
-                                })
-                                .response
-                                .on_hover_text(&name);
-                        }
-                    }
-                });
-                ui.end_row();
-            }
-        });
+        ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+        for (n, line) in lines.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.set_height(row_h);
+                let (num, _) = ui.allocate_exact_size(vec2(36.0, row_h), egui::Sense::hover());
+                ui.painter().text(
+                    num.right_center(),
+                    egui::Align2::RIGHT_CENTER,
+                    (n + 1).to_string(),
+                    font.clone(),
+                    pal.line_no,
+                );
+                ui.add_space(10.0);
+                let (code, _) = ui.allocate_exact_size(vec2(code_w, row_h), egui::Sense::hover());
+                let galley = ui.fonts(|f| f.layout_job(highlight(line, &font, &pal)));
+                let pos = code.left_center() - vec2(0.0, galley.size().y / 2.0);
+                ui.painter().with_clip_rect(code).galley(pos, galley, pal.text);
+                for name in names_in_line(line) {
+                    let Some((text, state)) = value_of(&name) else { continue };
+                    let short = name.rsplit('.').next().unwrap_or(&name).to_string();
+                    let color = match state {
+                        Some(true) => c.green,
+                        Some(false) => c.soft,
+                        None => c.accent,
+                    };
+                    egui::Frame::new()
+                        .fill(color.gamma_multiply(0.12))
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(6, 1))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if state.is_some() {
+                                let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), egui::Sense::hover());
+                                ui.painter().circle_filled(r.center(), 3.5, color);
+                            }
+                            ui.label(RichText::new(short).size(12.0).color(c.soft));
+                            ui.label(RichText::new(text).font(FontId::monospace(12.5)).color(color));
+                        })
+                        .response
+                        .on_hover_text(&name);
+                }
+            });
+        }
     });
 }
 
