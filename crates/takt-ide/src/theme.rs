@@ -96,6 +96,11 @@ pub mod icon {
     pub const REFRESH: char = '\u{e145}';
     pub const X: char = '\u{e1b2}';
     pub const CHEVRON_DOWN: char = '\u{e06d}';
+    pub const CHEVRON_RIGHT: char = '\u{e06f}';
+    pub const CHEVRON_UP: char = '\u{e070}';
+    pub const FOLDER_CLOSED: char = '\u{e0d7}';
+    pub const SETTINGS: char = '\u{e154}';
+    pub const ACTIVITY: char = '\u{e038}';
 }
 
 const INTER: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
@@ -265,54 +270,59 @@ pub fn section_title(ui: &mut Ui, title: &str) {
     ui.label(RichText::new(title).font(FontId::new(16.0, semi())).color(colors(ui).text));
 }
 
-/// Élément de la barre latérale : icône, libellé, information à droite.
-pub fn nav_item(ui: &mut Ui, ic: char, label: &str, selected: bool, trailing: Option<(String, Color32)>) -> Response {
+/// Ligne de l'arborescence du projet, comme dans TIA : indentation, flèche
+/// de dépliage, icône, libellé. Renvoie (réponse de la ligne, clic sur la flèche).
+#[allow(clippy::too_many_arguments)]
+pub fn tree_item(
+    ui: &mut Ui,
+    depth: usize,
+    expanded: Option<bool>,
+    ic: char,
+    label: &str,
+    selected: bool,
+    trailing: Option<(String, Color32)>,
+    label_color: Option<Color32>,
+) -> (Response, bool) {
     let c = colors(ui);
     let width = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
-    let p = ui.painter();
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
     if selected {
-        p.rect_filled(rect, 8.0, c.accent_soft);
+        ui.painter().rect_filled(rect, 6.0, c.accent_soft);
     } else if resp.hovered() {
-        p.rect_filled(rect, 8.0, c.hover);
+        ui.painter().rect_filled(rect, 6.0, c.hover);
     }
-    let fg = if selected { c.accent } else { c.text };
-    let icon_fg = if selected { c.accent } else { c.soft };
-    p.text(rect.left_center() + vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, ic, FontId::new(16.0, icons()), icon_fg);
-    let font = FontId::new(14.0, medium());
-    let max = rect.width() - 64.0;
-    let galley = ui.painter().layout(label.to_string(), font, fg, f32::INFINITY);
-    let text_pos = rect.left_center() + vec2(40.0, -galley.size().y / 2.0);
-    let clip = egui::Rect::from_min_size(rect.min, vec2(40.0 + max, rect.height()));
-    ui.painter().with_clip_rect(clip).galley(text_pos, galley, fg);
+    let x = rect.left() + 4.0 + depth as f32 * 14.0;
+    let chevron = egui::Rect::from_center_size(egui::pos2(x + 7.0, rect.center().y), vec2(16.0, 22.0));
+    let mut toggled = false;
+    if let Some(open) = expanded {
+        let ch = if open { icon::CHEVRON_DOWN } else { icon::CHEVRON_RIGHT };
+        ui.painter().text(chevron.center(), egui::Align2::CENTER_CENTER, ch, FontId::new(12.0, icons()), c.soft);
+        toggled = resp.clicked() && ui.input(|i| i.pointer.interact_pos()).is_some_and(|pos| chevron.contains(pos));
+    }
+    let fg = if selected { c.accent } else { label_color.unwrap_or(c.text) };
+    let icon_fg = if selected { c.accent } else { label_color.unwrap_or(c.soft) };
+    ui.painter().text(
+        egui::pos2(x + 18.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        ic,
+        FontId::new(14.0, icons()),
+        icon_fg,
+    );
+    let font = FontId::new(13.5, if selected { medium() } else { FontFamily::Proportional });
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font, fg);
+    let text_x = x + 38.0;
+    let clip = egui::Rect::from_min_max(egui::pos2(text_x, rect.top()), egui::pos2(rect.right() - 46.0, rect.bottom()));
+    ui.painter().with_clip_rect(clip).galley(egui::pos2(text_x, rect.center().y - galley.size().y / 2.0), galley, fg);
     if let Some((t, color)) = trailing {
         ui.painter().text(
-            rect.right_center() - vec2(10.0, 0.0),
+            rect.right_center() - vec2(8.0, 0.0),
             egui::Align2::RIGHT_CENTER,
             t,
-            FontId::proportional(12.5),
+            FontId::proportional(11.5),
             color,
         );
     }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// Petit titre de section dans la barre latérale, avec un bouton « + » optionnel.
-pub fn nav_header(ui: &mut Ui, title: &str, add_tip: Option<&str>) -> bool {
-    let c = colors(ui);
-    let mut clicked = false;
-    ui.add_space(10.0);
-    ui.horizontal(|ui| {
-        ui.add_space(12.0);
-        ui.label(RichText::new(title).size(12.5).color(c.soft));
-        if let Some(tip) = add_tip {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(4.0);
-                clicked = ghost_icon(ui, icon::PLUS, tip).clicked();
-            });
-        }
-    });
-    clicked
+    (resp.on_hover_cursor(egui::CursorIcon::PointingHand), toggled)
 }
 
 /// Bouton icône discret (sans fond tant qu'on ne le survole pas).

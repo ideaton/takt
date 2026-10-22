@@ -61,6 +61,12 @@
       "comment": "Trémie presque vide"
     },
     {
+      "name": "Pompe_Graisse",
+      "type": "BOOL",
+      "address": "%Q0.4",
+      "comment": "Pompe de graissage"
+    },
+    {
       "name": "Niveau_Tremie",
       "type": "INT",
       "address": "%IW0",
@@ -88,15 +94,232 @@
   "blocks": [
     {
       "name": "Main",
-      "source": "ORGANIZATION_BLOCK Main\n// Bloc cyclique principal (OB1) : convoyeur avec comptage de pièces\nVAR\n    moteur     : FB_Moteur;\n    fronts     : R_TRIG;\n    compteur   : CTU;\n    niveau_pct : REAL;\nEND_VAR\nVAR CONSTANT\n    LOT : INT := 10;\nEND_VAR\nBEGIN\n    // Commande du moteur : marche/arrêt avec auto-maintien et défaut de démarrage\n    #moteur(Marche := \"BP_Marche\",\n            Arret  := NOT \"BP_Arret\" OR \"Lot_Termine\",\n            Retour := \"Capteur_Piece\" OR \"Retour_Marche\",\n            Tempo_Defaut := T#5s);\n    \"Moteur_Convoyeur\" := #moteur.Sortie;\n    \"Voyant_Defaut\" := #moteur.Defaut;\n\n    // Comptage des pièces sur front montant du capteur\n    #fronts(CLK := \"Capteur_Piece\");\n    #compteur(CU := #fronts.Q, R := \"BP_Reset\" OR FirstScan, PV := #LOT);\n    \"Nb_Pieces\" := #compteur.CV;\n    \"Lot_Termine\" := #compteur.Q;\n\n    // Niveau de la trémie : 0..27648 → 0..100 %\n    #niveau_pct := SCALE_X(MIN := 0.0, VALUE := NORM_X(MIN := 0, VALUE := \"Niveau_Tremie\", MAX := 27648), MAX := 100.0);\n    \"Niveau_Moyen\" := Moyenne(#niveau_pct);\n    \"Alarme_Niveau\" := \"Niveau_Moyen\" < 10.0;\nEND_ORGANIZATION_BLOCK\n"
+      "source": "ORGANIZATION_BLOCK Main\n// Bloc cyclique principal (OB1) : convoyeur avec comptage de pièces\nVAR\n    moteur     : FB_Moteur;\n    fronts     : R_TRIG;\n    compteur   : CTU;\n    niveau_pct : REAL;\n    graissage  : Graissage;\nEND_VAR\nVAR CONSTANT\n    LOT : INT := 10;\nEND_VAR\nBEGIN\n    // Commande du moteur : marche/arrêt avec auto-maintien et défaut de démarrage\n    #moteur(Marche := \"BP_Marche\",\n            Arret  := NOT \"BP_Arret\" OR \"Lot_Termine\",\n            Retour := \"Capteur_Piece\" OR \"Retour_Marche\",\n            Tempo_Defaut := T#5s);\n    \"Moteur_Convoyeur\" := #moteur.Sortie;\n    \"Voyant_Defaut\" := #moteur.Defaut;\n\n    // Comptage des pièces sur front montant du capteur\n    #fronts(CLK := \"Capteur_Piece\");\n    #compteur(CU := #fronts.Q, R := \"BP_Reset\" OR FirstScan, PV := #LOT);\n    \"Nb_Pieces\" := #compteur.CV;\n    \"Lot_Termine\" := #compteur.Q;\n\n    // Niveau de la trémie : 0..27648 → 0..100 %\n    #niveau_pct := SCALE_X(MIN := 0.0, VALUE := NORM_X(MIN := 0, VALUE := \"Niveau_Tremie\", MAX := 27648), MAX := 100.0);\n    \"Niveau_Moyen\" := Moyenne(#niveau_pct);\n    \"Alarme_Niveau\" := \"Niveau_Moyen\" < 10.0;\n\n    // Graissage de la chaîne à chaque lot terminé (bloc GRAPH)\n    #graissage(Depart := \"Lot_Termine\");\nEND_ORGANIZATION_BLOCK\n"
     },
     {
       "name": "FB_Moteur",
-      "source": "FUNCTION_BLOCK FB_Moteur\n// Moteur avec auto-maintien et surveillance du retour de marche\nVAR_INPUT\n    Marche       : BOOL;\n    Arret        : BOOL;\n    Retour       : BOOL;\n    Tempo_Defaut : TIME := T#3s;\nEND_VAR\nVAR_OUTPUT\n    Sortie : BOOL;\n    Defaut : BOOL;\nEND_VAR\nVAR\n    surveillance : TON;\nEND_VAR\nBEGIN\n    IF #Arret OR #Defaut THEN\n        #Sortie := FALSE;\n    ELSIF #Marche THEN\n        #Sortie := TRUE;\n    END_IF;\n\n    // Défaut si la marche n'est pas confirmée à temps\n    #surveillance(IN := #Sortie AND NOT #Retour, PT := #Tempo_Defaut);\n    IF #surveillance.Q THEN\n        #Defaut := TRUE;\n    END_IF;\n    IF #Marche AND #Arret THEN\n        #Defaut := FALSE;   // acquittement : marche + arrêt ensemble\n    END_IF;\nEND_FUNCTION_BLOCK\n"
+      "language": "ladder",
+      "source": "",
+      "kind": "fb",
+      "interface": [
+        {
+          "section": "input",
+          "name": "Marche",
+          "type": "BOOL",
+          "init": "",
+          "comment": "Demande de marche"
+        },
+        {
+          "section": "input",
+          "name": "Arret",
+          "type": "BOOL",
+          "init": "",
+          "comment": "Demande d'arrêt"
+        },
+        {
+          "section": "input",
+          "name": "Retour",
+          "type": "BOOL",
+          "init": "",
+          "comment": "Retour de marche du contacteur"
+        },
+        {
+          "section": "input",
+          "name": "Tempo_Defaut",
+          "type": "TIME",
+          "init": "T#3s",
+          "comment": "Délai pour le retour de marche"
+        },
+        {
+          "section": "output",
+          "name": "Sortie",
+          "type": "BOOL",
+          "init": "",
+          "comment": "Commande du contacteur"
+        },
+        {
+          "section": "output",
+          "name": "Defaut",
+          "type": "BOOL",
+          "init": "",
+          "comment": "Défaut de démarrage"
+        },
+        {
+          "section": "static",
+          "name": "surveillance",
+          "type": "TON",
+          "init": "",
+          "comment": ""
+        }
+      ],
+      "networks": [
+        {
+          "title": "Marche avec auto-maintien",
+          "comment": "Arrêt ou défaut prioritaires.",
+          "rung": [
+            {
+              "type": "parallel",
+              "branches": [
+                [
+                  {
+                    "type": "contact",
+                    "kind": "no",
+                    "operand": "#Marche"
+                  }
+                ],
+                [
+                  {
+                    "type": "contact",
+                    "kind": "no",
+                    "operand": "#Sortie"
+                  }
+                ]
+              ]
+            },
+            {
+              "type": "contact",
+              "kind": "nc",
+              "operand": "#Arret"
+            },
+            {
+              "type": "contact",
+              "kind": "nc",
+              "operand": "#Defaut"
+            }
+          ],
+          "coils": [
+            {
+              "kind": "assign",
+              "operand": "#Sortie",
+              "value": ""
+            }
+          ]
+        },
+        {
+          "title": "Surveillance du retour de marche",
+          "comment": "Défaut si le contacteur ne confirme pas à temps.",
+          "rung": [
+            {
+              "type": "contact",
+              "kind": "no",
+              "operand": "#Sortie"
+            },
+            {
+              "type": "contact",
+              "kind": "nc",
+              "operand": "#Retour"
+            },
+            {
+              "type": "timer",
+              "kind": "ton",
+              "instance": "surveillance",
+              "pt": "#Tempo_Defaut"
+            }
+          ],
+          "coils": [
+            {
+              "kind": "set",
+              "operand": "#Defaut",
+              "value": ""
+            }
+          ]
+        },
+        {
+          "title": "Acquittement",
+          "comment": "Marche + arrêt ensemble.",
+          "rung": [
+            {
+              "type": "contact",
+              "kind": "no",
+              "operand": "#Marche"
+            },
+            {
+              "type": "contact",
+              "kind": "no",
+              "operand": "#Arret"
+            }
+          ],
+          "coils": [
+            {
+              "kind": "reset",
+              "operand": "#Defaut",
+              "value": ""
+            }
+          ]
+        }
+      ]
     },
     {
       "name": "Moyenne",
-      "source": "FUNCTION Moyenne : REAL\n// Moyenne glissante sur 8 mesures (les mémoires sont dans \"Historique\")\nVAR_INPUT\n    Mesure : REAL;\nEND_VAR\nVAR\n    i     : INT;\n    somme : REAL;\nEND_VAR\nBEGIN\n    FOR #i := 7 TO 1 BY -1 DO\n        \"Historique\"[#i] := \"Historique\"[#i - 1];\n    END_FOR;\n    \"Historique\"[0] := #Mesure;\n    #somme := 0.0;\n    FOR #i := 0 TO 7 DO\n        #somme := #somme + \"Historique\"[#i];\n    END_FOR;\n    Moyenne := #somme / 8.0;\nEND_FUNCTION\n"
+      "language": "basic",
+      "kind": "fc",
+      "return_type": "REAL",
+      "interface": [
+        {
+          "section": "input",
+          "name": "Mesure",
+          "type": "REAL",
+          "init": "",
+          "comment": "Nouvelle mesure"
+        }
+      ],
+      "source": "' Moyenne glissante sur 8 mesures (mémoires dans \"Historique\")\nDIM i AS INT\nDIM somme AS REAL\n\n' Décale l'historique et ajoute la nouvelle mesure\nFOR i = 7 TO 1 STEP -1\n    \"Historique\"[i] = \"Historique\"[i - 1]\nNEXT i\n\"Historique\"[0] = Mesure\n\nsomme = 0.0\nFOR i = 0 TO 7\n    somme = somme + \"Historique\"[i]\nNEXT i\nMoyenne = somme / 8.0\n"
+    },
+    {
+      "name": "Graissage",
+      "language": "sfc",
+      "source": "",
+      "kind": "fb",
+      "interface": [
+        {
+          "section": "input",
+          "name": "Depart",
+          "type": "BOOL",
+          "init": "",
+          "comment": "Lance un cycle de graissage"
+        }
+      ],
+      "sfc": {
+        "steps": [
+          {
+            "number": 1,
+            "name": "Attente",
+            "actions": []
+          },
+          {
+            "number": 2,
+            "name": "Graissage",
+            "actions": [
+              {
+                "qualifier": "n",
+                "operand": "\"Pompe_Graisse\""
+              }
+            ]
+          },
+          {
+            "number": 3,
+            "name": "Égouttage",
+            "actions": []
+          }
+        ],
+        "transitions": [
+          {
+            "from": 1,
+            "to": 2,
+            "condition": "#Depart"
+          },
+          {
+            "from": 2,
+            "to": 3,
+            "condition": "T_Etape >= T#3s"
+          },
+          {
+            "from": 3,
+            "to": 1,
+            "condition": "T_Etape >= T#2s AND NOT #Depart"
+          }
+        ]
+      }
     }
   ],
   "watch_tables": [

@@ -100,7 +100,8 @@ pub fn palette(dark: bool) -> Palette {
 
 /// Colore une source ST. Le découpage est volontairement simple et ne
 /// dépend pas du compilateur : il doit marcher sur du code incomplet.
-pub fn highlight(text: &str, font: &FontId, pal: &Palette) -> LayoutJob {
+/// `basic` : coloration BASIC (commentaires `'`, mots-clés BASIC).
+pub fn highlight(text: &str, font: &FontId, pal: &Palette, basic: bool) -> LayoutJob {
     let mut job = LayoutJob::default();
     let fmt = |c: Color32| TextFormat { font_id: font.clone(), color: c, ..Default::default() };
     let b: Vec<char> = text.chars().collect();
@@ -113,7 +114,7 @@ pub fn highlight(text: &str, font: &FontId, pal: &Palette) -> LayoutJob {
         let next = b.get(i + 1).copied();
         let start = i;
         let color;
-        if c == '/' && next == Some('/') {
+        if (c == '/' && next == Some('/') && !basic) || (c == '\'' && basic) {
             while i < b.len() && b[i] != '\n' {
                 i += 1;
             }
@@ -153,7 +154,9 @@ pub fn highlight(text: &str, font: &FontId, pal: &Palette) -> LayoutJob {
                 color = pal.number;
             } else if c == '#' {
                 color = pal.local;
-            } else if KEYWORDS.contains(&word.as_str()) {
+            } else if (!basic && KEYWORDS.contains(&word.as_str()))
+                || (basic && takt_compiler::lang::basic::KEYWORDS.contains(&word.as_str()))
+            {
                 color = pal.keyword;
             } else if TYPES.contains(&word.as_str()) || word.contains("_TO_") {
                 color = pal.ty;
@@ -187,7 +190,14 @@ pub struct LineMark {
 }
 
 /// Éditeur de code. Renvoie vrai si le texte a changé.
-pub fn code_editor(ui: &mut Ui, id: Id, source: &mut String, marks: &[LineMark], goto_line: &mut Option<u32>) -> bool {
+pub fn code_editor(
+    ui: &mut Ui,
+    id: Id,
+    source: &mut String,
+    marks: &[LineMark],
+    goto_line: &mut Option<u32>,
+    basic: bool,
+) -> bool {
     let font = FontId::monospace(13.5);
     let pal = palette(ui.visuals().dark_mode);
     let row_h = ui.fonts(|f| f.row_height(&font));
@@ -221,7 +231,7 @@ pub fn code_editor(ui: &mut Ui, id: Id, source: &mut String, marks: &[LineMark],
             }
 
             let mut layouter = |ui: &Ui, text: &str, _wrap: f32| {
-                let job = highlight(text, &font, &pal);
+                let job = highlight(text, &font, &pal, basic);
                 ui.fonts(|f| f.layout_job(job))
             };
             let out = egui::TextEdit::multiline(source)
@@ -342,7 +352,7 @@ pub fn names_in_line(line: &str) -> Vec<String> {
 pub type MonitorValue = (String, Option<bool>);
 
 /// Vue de visualisation : code en lecture seule, valeurs à droite de chaque ligne.
-pub fn monitor_view(ui: &mut Ui, id: Id, source: &str, value_of: &dyn Fn(&str) -> Option<MonitorValue>) {
+pub fn monitor_view(ui: &mut Ui, id: Id, source: &str, value_of: &dyn Fn(&str) -> Option<MonitorValue>, basic: bool) {
     let font = FontId::monospace(13.5);
     let pal = palette(ui.visuals().dark_mode);
     let c = crate::theme::colors(ui);
@@ -370,7 +380,7 @@ pub fn monitor_view(ui: &mut Ui, id: Id, source: &str, value_of: &dyn Fn(&str) -
                 );
                 ui.add_space(10.0);
                 let (code, _) = ui.allocate_exact_size(vec2(code_w, row_h), egui::Sense::hover());
-                let galley = ui.fonts(|f| f.layout_job(highlight(line, &font, &pal)));
+                let galley = ui.fonts(|f| f.layout_job(highlight(line, &font, &pal, basic)));
                 let pos = code.left_center() - vec2(0.0, galley.size().y / 2.0);
                 ui.painter().with_clip_rect(code).galley(pos, galley, pal.text);
                 for name in names_in_line(line) {

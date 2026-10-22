@@ -179,6 +179,8 @@ pub struct Gen<'a> {
     block: String,
     pub symbols: Vec<Symbol>,
     pub init: Vec<(u16, u32)>,
+    /// Instances de FB utilisateur : (type en majuscules, chemin).
+    pub instances: Vec<(String, String)>,
 }
 
 /// Erreur déjà signalée dans `diags`.
@@ -206,6 +208,7 @@ impl<'a> Gen<'a> {
             block: String::new(),
             symbols: Vec::new(),
             init: Vec::new(),
+            instances: Vec::new(),
         };
         for (name, slot, ty) in [("FirstScan", sys::FIRST_SCAN, Ty::Bool), ("SysTime", sys::SYS_TIME, Ty::Time)] {
             g.globals.insert(
@@ -311,6 +314,7 @@ impl<'a> Gen<'a> {
                 }
             }
             Ty::Fb(FbType::User(n)) => {
+                self.instances.push((n.clone(), path.to_string()));
                 let layout = self.layout(n, pos)?;
                 for f in &layout.fields {
                     self.place_var(base + f.offset, &f.ty, f.init, &format!("{path}.{}", f.name), block, pos)?;

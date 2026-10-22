@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod board;
 pub mod codegen;
+pub mod lang;
 pub mod lexer;
 pub mod parser;
 pub mod project;
@@ -103,6 +104,8 @@ pub struct Compiled {
     pub symbols: Vec<Symbol>,
     pub io: Vec<IoEntry>,
     pub init: Vec<(u16, u32)>,
+    /// Instances de FB utilisateur : (type en majuscules, chemin).
+    pub instances: Vec<(String, String)>,
 }
 
 impl Compiled {
@@ -127,6 +130,39 @@ impl Compiled {
 
     pub fn block_symbols<'s>(&'s self, block: &'s str) -> impl Iterator<Item = &'s Symbol> + 's {
         self.symbols.iter().filter(move |s| s.block.as_deref() == Some(block))
+    }
+
+    /// Préfixe des variables d'un bloc pour la visualisation : le nom du bloc
+    /// pour un OB ou une FC, le chemin de la première instance pour un FB.
+    pub fn scope_of(&self, block: &str) -> String {
+        let key = block.to_ascii_uppercase();
+        self.instances.iter().find(|(t, _)| *t == key).map(|(_, p)| p.clone()).unwrap_or_else(|| block.to_string())
+    }
+
+    /// Variable vue depuis un bloc : locale (`#x`, `t1.ET`) ou globale (`"Tag"`).
+    pub fn lookup_in_block(&self, block: &str, name: &str) -> Option<(u16, Ty)> {
+        let n = name.trim();
+        if n.starts_with('"') {
+            return self.resolve(n);
+        }
+        let key = n.trim_start_matches('#');
+        self.resolve(&format!("{}.{key}", self.scope_of(block))).or_else(|| self.resolve(key))
+    }
+
+    /// Variables d'un bloc à lire pour la visualisation.
+    pub fn slots_of_block(&self, block: &str) -> Vec<u16> {
+        let prefix = format!("{}.", self.scope_of(block)).to_ascii_uppercase();
+        let mut v = Vec::new();
+        for s in &self.symbols {
+            if s.block.is_none() || s.path.to_ascii_uppercase().starts_with(&prefix) {
+                match s.ty {
+                    Ty::Array { len, .. } => v.extend(s.slot..s.slot + len),
+                    ref t if t.is_scalar() => v.push(s.slot),
+                    _ => {}
+                }
+            }
+        }
+        v
     }
 }
 
@@ -154,6 +190,28 @@ pub fn block_kind(source: &str) -> Option<PouKind> {
     parser::parse(source).ok().and_then(|p| p.first().map(|p| p.kind))
 }
 
+/// Ramène la position d'une erreur du ST généré vers ce que l'utilisateur a saisi.
+fn map_origin(d: &mut Diag, block: &project::Block, g: &lang::Generated) {
+    if block.language == lang::Language::St
+        || d.pos.line == 0
+        || d.msg.starts_with("étape ")
+        || d.msg.starts_with("transition ")
+    {
+        return;
+    }
+    let origin = g.origin(d.pos.line);
+    match origin {
+        lang::Origin::Line(l) => d.pos.line = l,
+        lang::Origin::Network(i) | lang::Origin::Step(i) | lang::Origin::Transition(i) => {
+            d.pos = Pos { line: i as u32 + 1, col: 1 };
+        }
+        lang::Origin::Interface | lang::Origin::Generated => d.pos = Pos { line: 0, col: 1 },
+    }
+    if let Some(where_) = origin.describe(block) {
+        d.msg = format!("{where_} : {}", d.msg);
+    }
+}
+
 pub fn compile(p: &Project) -> Output {
     let mut diags = Vec::new();
     let Some(board) = board::find(&p.device.board) else {
@@ -165,10 +223,26 @@ pub fn compile(p: &Project) -> Output {
         diags.push(diag(BLOCK_DEVICE, 0, Severity::Error, "le temps de cycle doit être entre 100 µs et 1 s"));
     }
 
-    // 1. Analyse syntaxique de tous les blocs
+    // 1. Traduction en ST (CONT, GRAPH, BASIC) puis analyse syntaxique
+    let generated: Vec<lang::Generated> = p.blocks.iter().map(|b| b.to_st()).collect();
     let mut parsed = Vec::new();
-    for b in &p.blocks {
-        match parser::parse(&b.source) {
+    for (b, g) in p.blocks.iter().zip(&generated) {
+        if b.language == lang::Language::Sfc {
+            for (origin, msg) in b.sfc.check() {
+                let line = match origin {
+                    lang::Origin::Step(i) | lang::Origin::Transition(i) => i as u32 + 1,
+                    _ => 0,
+                };
+                let prefix = origin.describe(b).map(|d| format!("{d} : ")).unwrap_or_default();
+                diags.push(Diag {
+                    block: b.name.clone(),
+                    pos: Pos { line, col: 1 },
+                    severity: Severity::Error,
+                    msg: format!("{prefix}{msg}"),
+                });
+            }
+        }
+        match parser::parse(&g.source()) {
             Ok(pous) => parsed.push((b.name.clone(), pous)),
             Err(e) => diags.push(Diag { block: b.name.clone(), pos: e.pos, severity: Severity::Error, msg: e.msg }),
         }
@@ -279,6 +353,12 @@ pub fn compile(p: &Project) -> Output {
     }
 
     diags.append(&mut g.diags);
+    // Les erreurs des blocs traduits renvoient au réseau, à l'étape ou à la ligne d'origine
+    for d in diags.iter_mut() {
+        if let Some(i) = p.blocks.iter().position(|b| b.name == d.block) {
+            map_origin(d, &p.blocks[i], &generated[i]);
+        }
+    }
     diags.dedup();
     let mut seen = Vec::new();
     diags.retain(|d| {
@@ -392,6 +472,7 @@ pub fn compile(p: &Project) -> Output {
         symbols: g.symbols,
         io: io_entries,
         init: g.init,
+        instances: g.instances,
     };
     Output { compiled: Some(compiled), diags }
 }

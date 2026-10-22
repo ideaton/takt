@@ -22,11 +22,7 @@ fn project(tags: &[(&str, &str, &str)], blocks: &[&str], cycle_us: u32) -> Proje
                 comment: String::new(),
             })
             .collect(),
-        blocks: blocks
-            .iter()
-            .enumerate()
-            .map(|(i, s)| Block { name: format!("B{i}"), source: s.to_string() })
-            .collect(),
+        blocks: blocks.iter().enumerate().map(|(i, s)| Block::st(&format!("B{i}"), s)).collect(),
         watch_tables: vec![],
     }
 }

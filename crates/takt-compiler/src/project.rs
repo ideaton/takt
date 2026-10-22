@@ -3,6 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::lang::ladder::Network;
+use crate::lang::sfc::Sfc;
+use crate::lang::{BlockType, IfaceVar, Language};
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
@@ -41,8 +45,27 @@ pub struct Tag {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Block {
     pub name: String,
-    /// Source Structured Text complète du bloc.
+    #[serde(default)]
+    pub language: Language,
+    /// SCL/ST : source complète du bloc. BASIC : corps du bloc.
+    #[serde(default)]
     pub source: String,
+    /// Type de bloc pour CONT, GRAPH et BASIC (en ST, l'en-tête de la source fait foi).
+    #[serde(default)]
+    pub kind: BlockType,
+    /// Type renvoyé par une FC (CONT, GRAPH, BASIC).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub return_type: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interface: Vec<IfaceVar>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<Network>,
+    #[serde(default, skip_serializing_if = "sfc_is_empty")]
+    pub sfc: Sfc,
+}
+
+fn sfc_is_empty(s: &Sfc) -> bool {
+    s.steps.is_empty() && s.transitions.is_empty()
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -84,10 +107,7 @@ impl Project {
             name: name.into(),
             device: Device { name: "API_1".into(), board: "pico2".into(), cycle_us: 1000 },
             tags: vec![],
-            blocks: vec![Block {
-                name: "Main".into(),
-                source: "ORGANIZATION_BLOCK Main\n// Bloc cyclique principal (OB1)\nVAR\nEND_VAR\nBEGIN\n\nEND_ORGANIZATION_BLOCK\n".into(),
-            }],
+            blocks: vec![Block::new("Main", BlockType::Ob, Language::Ladder)],
             watch_tables: vec![WatchTable { name: "Table de visualisation_1".into(), rows: vec![] }],
         }
     }

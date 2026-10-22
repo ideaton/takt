@@ -3,7 +3,10 @@
 
 mod app;
 mod editor;
+mod iface_ui;
 mod instructions;
+mod ladder_ui;
+mod sfc_ui;
 mod target;
 mod theme;
 mod views;

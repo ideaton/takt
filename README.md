@@ -47,17 +47,30 @@ WCET par bloc :
 
 ## Takt Studio (l'IDE)
 
-![Éditeur de Takt Studio](docs/editeur.png)
+![Éditeur CONT de Takt Studio](docs/cont.png)
 
 Les notions et les raccourcis de TIA Portal, dans une interface épurée façon
 Apple (police Inter, icônes Lucide, thème clair et sombre) :
 
-- **Barre latérale** : appareil, variables API, blocs de programme (OB / FB / FC),
-  tables de visualisation et de forçage, état de la liaison.
+- **Arborescence du projet** comme dans TIA : appareil, blocs de programme
+  numérotés (OB1, FB1, FC1…), variables API, tables de visualisation et de
+  forçage, état de la liaison.
+- **Quatre langages au choix pour chaque bloc** :
+  - **CONT** (ladder) : réseaux avec titre et commentaire, contacts NO/NF/P/N,
+    branches parallèles, TON/TOF/TP, CTU/CTD, comparateurs, MOVE, bobines
+    `( )` `(/)` `(S)` `(R)`, barre des favoris ; en visualisation, le courant
+    passe en vert ;
+  - **SCL** (Structured Text) : éditeur texte avec coloration ;
+  - **GRAPH** (SFC / grafcet) : étapes, actions N/S/R/ST, transitions et sauts,
+    étape active en vert avec son temps ;
+  - **BASIC** structuré : `IF/ELSEIF`, `FOR/NEXT`, `SELECT CASE`, `DIM`, `SET`/`RESET`.
+- **Interface du bloc** (Input, Output, Static, Temp, Constant) pour CONT,
+  GRAPH et BASIC, et **ST généré** affichable sous chaque bloc.
 - **Configuration de l'appareil** : choix de la carte, schéma des broches,
   temps de cycle, jauge « temps de cycle garanti ».
-- **Éditeur ST** : coloration, erreurs dans la marge, carte « Instructions »
-  qui insère TON/CTU/R_TRIG… et déclare l'instance (multi-instance).
+- **Carte « Instructions »** adaptée au langage : palette CONT, étapes GRAPH,
+  extraits SCL et BASIC ; les TON/CTU… insérés sont déclarés automatiquement
+  (multi-instance).
 - **Variables API** : `%I0.0`, `%Q0.1`, `%IW0`, `%QW2`, `%M`, ou sans adresse.
 - **En ligne** : chargement, RUN/STOP, visualisation des valeurs dans le code
   (lunettes), tables de visualisation, modification et forçage, badge
@@ -67,7 +80,9 @@ Apple (police Inter, icônes Lucide, thème clair et sombre) :
 - **PLCSIM intégré** : le simulateur exécute exactement le runtime du
   firmware, avec des interrupteurs pour les entrées et des voyants pour les sorties.
 
-![Visualisation en ligne avec le simulateur](docs/visualisation.png)
+![Visualisation en ligne d'un bloc CONT avec le simulateur](docs/visualisation.png)
+
+![Éditeur GRAPH](docs/graph.png)
 
 | Raccourci | Action |
 |---|---|
@@ -77,7 +92,18 @@ Apple (police Inter, icônes Lucide, thème clair et sombre) :
 | Ctrl+T | Visualisation on/off |
 | Ctrl+S | Enregistrer |
 
-## Langage supporté
+## Langages
+
+CONT, GRAPH et BASIC sont traduits en Structured Text avant la compilation.
+Les règles de déterminisme et la preuve du temps de cycle s'appliquent donc à
+l'identique quel que soit le langage. Les erreurs sont renvoyées au réseau, à
+l'étape ou à la ligne BASIC d'origine.
+
+- GRAPH : la variable `Etape` contient l'étape active et `T_Etape` le temps
+  passé dedans (`T_Etape >= T#2s` dans une condition).
+- BASIC : `WHILE`, `DO … LOOP` et `GOTO` sont refusés comme en ST.
+
+Le Structured Text accepté :
 
 - Blocs : `ORGANIZATION_BLOCK` (ou `PROGRAM`), `FUNCTION_BLOCK`, `FUNCTION`.
 - Types : `BOOL`, `INT` (16 bits), `DINT`, `REAL`, `TIME`, `ARRAY[a..b] OF …`.
@@ -100,7 +126,7 @@ le pire cas exact et interdit la récursion par construction.
 | `crates/takt-compiler` | Lexer, parser, analyse, génération du bytecode, calcul du WCET ; outil en ligne de commande `taktc`. |
 | `crates/takt-ide` | Takt Studio (egui). |
 | `firmware/takt-rp2350` | Firmware RP2350 (deux cœurs, exécution en SRAM). |
-| `examples/` | Projet d'exemple : convoyeur avec moteur, comptage et niveau analogique. |
+| `examples/` | Projet d'exemple : convoyeur avec un OB en SCL, le moteur en CONT, la moyenne en BASIC et le graissage en GRAPH. |
 | `tools/logo.py` | Génère le logo (SVG, PNG, ICO). |
 
 ## Compiler et lancer
