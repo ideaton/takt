@@ -570,11 +570,6 @@ pub fn inspector(app: &mut App, ui: &mut Ui) {
                 (BottomTab::Journal, "Journal"),
             ],
         );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if theme::ghost_icon(ui, icon::X, "Masquer").clicked() {
-                app.drawer = false;
-            }
-        });
     });
     ui.add_space(8.0);
     match app.bottom {
@@ -720,7 +715,7 @@ fn histogram(ui: &mut Ui, hist: &[u32; 8]) {
 fn simulation_tab(app: &mut App, ui: &mut Ui) {
     let c = theme::colors(ui);
     let Some(sim) = app.target.as_mut().and_then(|t| t.as_sim()) else {
-        ui.label(soft(ui, "Choisissez « Simulateur PLCSIM » en bas de la barre latérale et connectez-vous."));
+        ui.label(soft(ui, "Choisissez la cible « Simulateur PLCSIM » (onglet Automate) puis passez en ligne."));
         return;
     };
     let shared = sim.shared.clone();

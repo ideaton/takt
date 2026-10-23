@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod config;
 mod editor;
 mod iface_ui;
 mod instructions;
@@ -9,6 +10,7 @@ mod ladder_ui;
 mod sfc_ui;
 mod target;
 mod theme;
+mod update;
 mod views;
 
 fn main() -> eframe::Result {

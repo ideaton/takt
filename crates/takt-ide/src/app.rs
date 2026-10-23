@@ -1,5 +1,6 @@
 //! Fenêtre principale : état du projet, actions (compiler, charger, en ligne)
-//! et disposition épurée façon Sura Novi (barre latérale, titre de page, tiroir).
+//! et vues. L'habillage de la fenêtre (ruban, panneaux ancrés, barre d'état)
+//! est dans `shell`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -15,10 +16,14 @@ use takt_vm::proto::{self, Status};
 use takt_vm::runtime::Mode;
 
 use crate::editor::{self, LineMark};
-use crate::instructions;
 use crate::target::{self, SerialTarget, SimTarget, Target};
 use crate::views;
+mod shell;
+
+use crate::config::Config;
+use crate::update;
 use crate::{iface_ui, ladder_ui, sfc_ui};
+use shell::{LeftTab, RibbonTab, ToolboxTab};
 
 pub const EXAMPLE: &str = include_str!("../../../examples/convoyeur.takt");
 
@@ -53,11 +58,12 @@ pub enum Modal {
     About,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum Pending {
     New,
     Open,
     Example,
+    Recent(PathBuf),
 }
 
 pub struct App {
@@ -92,6 +98,16 @@ pub struct App {
     /// Les polices installées par `theme::install` ne sont prises en compte
     /// qu'à l'image suivante : la première image n'affiche rien.
     first_frame: bool,
+    pub config: Config,
+    pub update: update::State,
+    /// Documents ouverts en onglets.
+    pub tabs: Vec<View>,
+    pub ribbon_tab: RibbonTab,
+    pub left_tab: LeftTab,
+    pub toolbox_tab: ToolboxTab,
+    /// Catégories repliées de la boîte à outils.
+    toolbox_closed: std::collections::HashSet<String>,
+    pub show_tree: bool,
     pub ld_sel: Option<ladder_ui::LdSel>,
     pub sfc_sel: Option<sfc_ui::SfcSel>,
     pub iface_open: bool,
@@ -135,15 +151,32 @@ impl App {
             show_instructions: true,
             logo: None,
             first_frame: true,
+            config: Config::load(),
+            update: update::State::Idle,
+            tabs: vec![View::Block(0)],
+            ribbon_tab: RibbonTab::Projet,
+            left_tab: LeftTab::Projet,
+            toolbox_tab: ToolboxTab::Normal,
+            toolbox_closed: Default::default(),
+            show_tree: true,
             ld_sel: None,
             sfc_sel: None,
             iface_open: false,
             show_st: false,
             tree_closed: Default::default(),
         };
-        app.log("Takt Studio prêt. Projet d'exemple « Convoyeur » chargé.");
-        if let Some(p) = path {
-            app.load_from(p);
+        app.log(format!("Takt Studio {} prêt.", update::VERSION));
+        if app.config.dark {
+            app.dark = true;
+            theme::apply(ctx, true);
+        }
+        // Projet passé en argument (double-clic sur un .takt), sinon le dernier ouvert
+        match path.or_else(|| app.config.existing_recent().into_iter().next()) {
+            Some(p) => app.load_from(p),
+            None => app.log("Projet d'exemple « Convoyeur » chargé."),
+        }
+        if app.config.check_updates {
+            app.update = update::start_check();
         }
         app
     }
@@ -198,6 +231,7 @@ impl App {
         self.compiled_rev = None;
         self.diags.clear();
         self.view = None;
+        self.tabs.clear();
         if !self.project.blocks.is_empty() {
             self.open(View::Block(0));
         }
@@ -221,6 +255,7 @@ impl App {
                 self.set_project(serde_json_example(), None);
                 self.log("Projet d'exemple « Convoyeur » chargé.");
             }
+            Pending::Recent(p) => self.load_from(p),
             Pending::Open => {
                 if let Some(p) = rfd::FileDialog::new().add_filter("Projet Takt", &["takt"]).pick_file() {
                     self.load_from(p);
@@ -233,6 +268,7 @@ impl App {
         match Project::load(&p) {
             Ok(proj) => {
                 self.log(format!("Projet ouvert : {}", p.display()));
+                self.config.add_recent(&p);
                 self.set_project(proj, Some(p));
             }
             Err(e) => self.log(format!("Erreur : {e}")),
@@ -252,6 +288,7 @@ impl App {
             Ok(()) => {
                 self.saved_rev = self.rev;
                 self.log(format!("Projet enregistré : {}", path.display()));
+                self.config.add_recent(&path);
                 self.path = Some(path);
             }
             Err(e) => self.log(format!("Erreur : {e}")),
@@ -261,7 +298,18 @@ impl App {
     // ---------- vues ----------
 
     pub fn open(&mut self, v: View) {
+        if !self.tabs.contains(&v) {
+            self.tabs.push(v);
+        }
         self.view = Some(v);
+    }
+
+    fn close_tab(&mut self, v: View) {
+        let pos = self.tabs.iter().position(|t| *t == v);
+        self.tabs.retain(|t| *t != v);
+        if self.view == Some(v) {
+            self.view = pos.and_then(|p| self.tabs.get(p.saturating_sub(1)).or(self.tabs.first()).copied());
+        }
     }
 
     pub fn add_block(&mut self, name: &str, kind: BlockType, lang: Language) {
@@ -281,6 +329,14 @@ impl App {
 
     fn delete_block(&mut self, i: usize) {
         self.project.blocks.remove(i);
+        self.tabs.retain(|t| *t != View::Block(i));
+        for t in self.tabs.iter_mut() {
+            if let View::Block(k) = t
+                && *k > i
+            {
+                *k -= 1;
+            }
+        }
         if let Some(View::Block(k)) = self.view {
             if k == i {
                 self.view = (!self.project.blocks.is_empty()).then_some(View::Block(0));
@@ -541,74 +597,8 @@ impl App {
         }
     }
 
-    /// Menu « … » du projet, en bas du titre de la barre latérale.
-    fn project_menu(&mut self, ui: &mut egui::Ui) {
-        let item = |ui: &mut egui::Ui, ic: char, label: &str, shortcut: &str| {
-            let text =
-                theme::rich(&format!("{ic}   {label}"), 14.0, egui::FontFamily::Proportional, theme::colors(ui).text);
-            ui.add(egui::Button::new(text).frame(false).shortcut_text(shortcut).min_size(egui::vec2(220.0, 28.0)))
-                .clicked()
-        };
-        if item(ui, icon::FILE_PLUS, "Nouveau projet", "") {
-            self.request(Pending::New);
-            ui.close_menu();
-        }
-        if item(ui, icon::FOLDER, "Ouvrir…", "") {
-            self.request(Pending::Open);
-            ui.close_menu();
-        }
-        if item(ui, icon::BOOK, "Exemple « Convoyeur »", "") {
-            self.request(Pending::Example);
-            ui.close_menu();
-        }
-        ui.separator();
-        if item(ui, icon::SAVE, "Enregistrer", "Ctrl+S") {
-            self.save(false);
-            ui.close_menu();
-        }
-        if item(ui, icon::SAVE, "Enregistrer sous…", "") {
-            self.save(true);
-            ui.close_menu();
-        }
-        ui.separator();
-        let (ic, label) = if self.dark { (icon::SUN, "Thème clair") } else { (icon::MOON, "Thème sombre") };
-        if item(ui, ic, label, "") {
-            self.dark = !self.dark;
-            theme::apply(ui.ctx(), self.dark);
-            ui.close_menu();
-        }
-        if item(ui, icon::INFO, "À propos de Takt Studio", "") {
-            self.modal = Some(Modal::About);
-            ui.close_menu();
-        }
-    }
-
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let c = theme::colors(ui);
-        ui.add_space(14.0);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            let logo = self.logo.get_or_insert_with(|| theme::logo_texture(ui.ctx())).clone();
-            ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(28.0, 28.0)).corner_radius(7.0));
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(RichText::new("Takt Studio").font(egui::FontId::new(17.0, theme::semi())).color(c.text));
-                let dirty = if self.dirty() { " ·  modifié" } else { "" };
-                ui.label(RichText::new(format!("{}{dirty}", self.project.name)).size(12.0).color(c.soft));
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button(theme::icon_text(icon::MORE, 15.0).color(c.soft), |ui| self.project_menu(ui))
-                    .response
-                    .on_hover_text("Projet");
-            });
-        });
-        ui.add_space(14.0);
-
-        ui.horizontal(|ui| {
-            ui.add_space(6.0);
-            ui.label(RichText::new("Arborescence du projet").size(12.5).color(c.soft));
-        });
-        ui.add_space(2.0);
         egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let open = |s: &App, k: &str| !s.tree_closed.contains(k);
@@ -788,7 +778,55 @@ impl App {
         });
     }
 
-    /// Bas de la barre latérale : cible et état de la liaison.
+    /// Bandeau « Version X disponible », comme dans Sura Novi.
+    fn update_banner(&mut self, ui: &mut egui::Ui) {
+        let c = theme::colors(ui);
+        let (title, detail, button) = match &self.update {
+            update::State::Available(r) => {
+                (format!("Version {} disponible", r.version), r.notes.lines().next().unwrap_or("").to_string(), true)
+            }
+            update::State::Downloading(_, r) => (format!("Téléchargement de la {}…", r.version), String::new(), false),
+            update::State::Failed(e) => ("Mise à jour impossible".to_string(), e.clone(), false),
+            _ => return,
+        };
+        egui::Frame::new().fill(c.accent_soft).corner_radius(theme::RADIUS).inner_margin(egui::Margin::same(12)).show(
+            ui,
+            |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&title).font(egui::FontId::new(13.5, theme::semi())));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if theme::ghost_icon(ui, icon::X, "Plus tard").clicked() {
+                            self.update = update::State::Idle;
+                        }
+                    });
+                });
+                if !detail.is_empty() {
+                    ui.label(RichText::new(detail).size(12.0).color(c.soft));
+                }
+                if button {
+                    let b = egui::Button::new(theme::rich(
+                        "Installer et redémarrer",
+                        13.5,
+                        theme::medium(),
+                        Color32::WHITE,
+                    ))
+                    .fill(c.accent);
+                    if ui.add(b).clicked()
+                        && let update::State::Available(r) = std::mem::replace(&mut self.update, update::State::Idle)
+                    {
+                        if self.dirty() {
+                            self.save(false);
+                        }
+                        self.update = update::start_download(r);
+                    }
+                }
+            },
+        );
+        ui.add_space(6.0);
+    }
+
+    /// Onglet « En ligne » de la gestion de projet : cible et état de la liaison.
     fn connection_box(&mut self, ui: &mut egui::Ui) {
         let c = theme::colors(ui);
         egui::Frame::new().fill(c.bg).corner_radius(theme::RADIUS).inner_margin(egui::Margin::same(12)).show(
@@ -863,266 +901,27 @@ impl App {
         );
     }
 
-    /// Pastilles d'état sous le titre : temps de cycle garanti, programme, forçage.
-    fn status_chips(&mut self, ui: &mut egui::Ui) {
-        let c = theme::colors(ui);
-        ui.horizontal_wrapped(|ui| {
-            match (&self.compiled, self.up_to_date()) {
-                (Some(cp), true) => {
-                    let color = if cp.wcet.ratio() > takt_compiler::WCET_WARN_RATIO { c.orange } else { c.green };
-                    theme::chip(
-                        ui,
-                        &format!("{}  cycle garanti {} / {} µs", icon::TIMER, cp.wcet.total_us, cp.wcet.cycle_us),
-                        color,
-                    )
-                    .on_hover_text("Pire cas prouvé par le compilateur, comparé au temps de cycle configuré");
-                }
-                _ if self.diags.iter().any(|d| d.severity == Severity::Error)
-                    && self.compiled_rev == Some(self.rev) =>
-                {
-                    let n = self.diags.iter().filter(|d| d.severity == Severity::Error).count();
-                    if theme::chip(ui, &format!("{}  {n} erreur(s)", icon::ALERT), c.red)
-                        .interact(egui::Sense::click())
-                        .clicked()
-                    {
-                        self.drawer = true;
-                        self.bottom = BottomTab::Info;
-                    }
-                }
-                _ => {
-                    theme::chip(ui, &format!("{}  non compilé", icon::HAMMER), c.soft);
-                }
-            }
-            if let Some(st) = &self.status {
-                match self.program_identical() {
-                    Some(true) => theme::chip(ui, &format!("{}  programme identique", icon::CHECK), c.green),
-                    _ => theme::chip(ui, &format!("{}  programme différent", icon::WARNING), c.orange),
-                };
-                if st.n_forces > 0 {
-                    theme::chip(ui, &format!("{}  {} forçage(s)", icon::ZAP, st.n_forces), c.red);
-                }
-                if st.overruns > 0 {
-                    theme::chip(ui, &format!("{}  {} dépassement(s)", icon::ALERT, st.overruns), c.red);
-                }
-            }
-        });
-    }
-
-    /// En-tête de page : titre, sous-titre, actions.
-    fn header(&mut self, ui: &mut egui::Ui) {
-        let (title, subtitle) = match self.view {
-            Some(View::Device) => (
-                self.project.device.name.clone(),
-                format!(
-                    "{} · cycle de {} µs",
-                    views::board_name(&self.project.device.board),
-                    self.project.device.cycle_us
-                ),
-            ),
-            Some(View::Tags) => ("Variables API".into(), "Entrées, sorties et mémentos de l'automate".into()),
-            Some(View::Block(i)) => {
-                let kind = self.block_kind(i);
-                let sub = match kind {
-                    Some(PouKind::Program) => "Bloc d'organisation · exécuté à chaque cycle",
-                    Some(PouKind::FunctionBlock) => "Bloc fonctionnel · avec mémoire d'instance",
-                    Some(PouKind::Function) => "Fonction · sans mémoire",
-                    None => "Bloc",
-                };
-                let number = self.block_number(i);
-                let b = &self.project.blocks[i];
-                (format!("{} [{number}]", b.name), format!("{} · {}", b.language.description(), sub))
-            }
-            Some(View::Watch(i)) => {
-                (self.project.watch_tables[i].name.clone(), "Visualiser, modifier et forcer des variables".into())
-            }
-            None => (self.project.name.clone(), String::new()),
-        };
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| theme::page_title(ui, &title, &subtitle));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::primary_button(ui, icon::DOWNLOAD, "Charger")
-                    .on_hover_text("Charger dans l'appareil (Ctrl+L)")
-                    .clicked()
-                {
-                    self.download();
-                }
-                if theme::secondary_button(ui, icon::HAMMER, "Compiler")
-                    .on_hover_text("Compiler et prouver le temps de cycle (Ctrl+B)")
-                    .clicked()
-                {
-                    self.compile();
-                }
-                if self.online() {
-                    let mut mode = self.status.map(|s| Mode::from_u8(s.mode) == Mode::Run).unwrap_or(false);
-                    if theme::segmented(ui, &mut mode, &[(false, "STOP"), (true, "RUN")]) {
-                        if mode { self.run() } else { self.stop() }
-                    }
-                }
-                if theme::toggle_button(ui, icon::EYE, "Visualiser", self.monitor)
-                    .on_hover_text("Valeurs en ligne dans le code (Ctrl+T)")
-                    .clicked()
-                {
-                    self.toggle_monitor();
-                }
-            });
-        });
-        ui.add_space(10.0);
-        self.status_chips(ui);
-        ui.add_space(14.0);
-    }
-
-    fn instructions_card(&mut self, ui: &mut egui::Ui) {
-        let c = theme::colors(ui);
-        let editing = match self.view {
-            Some(View::Block(i)) if !self.monitor => Some(i),
-            _ => None,
-        };
-        ui.add_space(18.0);
-        ui.horizontal(|ui| {
-            theme::section_title(ui, "Instructions");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::ghost_icon(ui, icon::X, "Masquer").clicked() {
-                    self.show_instructions = false;
-                }
-            });
-        });
-        ui.label(
-            RichText::new("Cliquez pour insérer au curseur. Les blocs standard sont déclarés automatiquement.")
-                .size(12.0)
-                .color(c.soft),
-        );
-        ui.add_space(8.0);
-        let lang = editing.map(|i| self.project.blocks[i].language).unwrap_or(Language::St);
-        if lang != Language::St {
-            self.other_instructions(ui, editing.unwrap(), lang);
-            return;
-        }
-        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-            for g in instructions::CATALOG {
-                ui.add_space(6.0);
-                ui.label(RichText::new(g.name).size(12.5).color(c.soft));
-                theme::card(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for it in g.items {
-                        let (name, rest) = it.label.split_once("  ").unwrap_or((it.label, ""));
-                        let r = ui
-                            .add_enabled(
-                                editing.is_some(),
-                                egui::Button::new(
-                                    RichText::new(format!("{name}  "))
-                                        .font(egui::FontId::new(13.5, theme::medium()))
-                                        .color(c.text),
-                                )
-                                .frame(false)
-                                .shortcut_text(RichText::new(rest).size(12.0).color(c.soft))
-                                .min_size(egui::vec2(ui.available_width(), 28.0)),
-                            )
-                            .on_hover_text(it.help);
-                        if r.clicked()
-                            && let Some(i) = editing
-                        {
-                            let id = editor_id(i);
-                            let src = &mut self.project.blocks[i].source;
-                            let snippet = match it.instance {
-                                Some((ty, prefix)) => {
-                                    let name = instructions::declare_instance(src, ty, prefix);
-                                    it.snippet.replace("{n}", &name)
-                                }
-                                None => it.snippet.to_string(),
-                            };
-                            editor::insert_snippet(ui.ctx(), id, src, &snippet);
-                            self.touch();
-                        }
-                    }
-                });
-            }
-            ui.add_space(12.0);
-        });
-    }
-
-    /// Palette CONT, outils GRAPH ou extraits BASIC.
-    fn other_instructions(&mut self, ui: &mut egui::Ui, i: usize, lang: Language) {
-        let c = theme::colors(ui);
-        egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| match lang {
-            Language::Ladder => {
-                for (group, tools) in ladder_ui::CATALOG {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(*group).size(12.5).color(c.soft));
-                    theme::card(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        for t in *tools {
-                            if ladder_ui::tool_button(ui, *t, true) {
-                                ladder_ui::apply(&mut self.project.blocks[i], &mut self.ld_sel, *t);
-                                self.touch();
-                            }
-                        }
-                    });
-                }
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new("L'élément s'insère après la sélection. Suppr efface l'élément sélectionné. Cliquez sur le titre d'une boîte (TON, CTU…) pour changer son type.")
-                        .size(11.5)
-                        .color(c.soft),
-                );
-            }
-            Language::Sfc => {
-                theme::card(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    if theme::secondary_button(ui, icon::PLUS, "Étape").clicked() {
-                        sfc_ui::add_step(&mut self.project.blocks[i], &mut self.sfc_sel);
-                        self.touch();
-                    }
-                });
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new("La première étape est l'étape initiale. Une transition sans condition n'est jamais franchie. Dans les conditions : T_Etape >= T#2s, \"Capteur\", #Entree…")
-                        .size(11.5)
-                        .color(c.soft),
-                );
-            }
-            _ => {
-                const SNIPPETS: &[(&str, &str)] = &[
-                    ("IF … THEN … END IF", "IF  THEN\n    \nEND IF\n"),
-                    ("IF … ELSE", "IF  THEN\n    \nELSE\n    \nEND IF\n"),
-                    ("FOR … NEXT", "FOR i = 0 TO 9\n    \nNEXT i\n"),
-                    ("SELECT CASE", "SELECT CASE x\n    CASE 0 : \n    CASE 1, 2 : \n    CASE ELSE : \nEND SELECT\n"),
-                    ("SET / RESET", "SET \"Sortie\"\n"),
-                    ("Temporisation", "CALL Tempo(IN := \"Entree\", PT := T#2s)\n"),
-                    ("DIM", "DIM compteur AS INT = 0\n"),
-                    ("Commentaire", "' \n"),
-                ];
-                theme::card(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for (label, snippet) in SNIPPETS {
-                        let b = egui::Button::new(RichText::new(*label).font(egui::FontId::new(13.5, theme::medium())))
-                            .frame(false)
-                            .min_size(egui::vec2(ui.available_width(), 28.0));
-                        if ui.add(b).clicked() {
-                            editor::insert_snippet(ui.ctx(), editor_id(i), &mut self.project.blocks[i].source, snippet);
-                            self.touch();
-                        }
-                    }
-                });
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new("Les variables se déclarent dans l'interface ou avec DIM. WHILE, DO … LOOP et GOTO sont refusés : leur durée n'est pas bornée.")
-                        .size(11.5)
-                        .color(c.soft),
-                );
-            }
-        });
-    }
-
     fn central(&mut self, ui: &mut egui::Ui) {
-        self.header(ui);
+        self.doc_tabs(ui);
+        let c = theme::colors(ui);
+        let page = egui::Frame::new()
+            .fill(c.bg)
+            .corner_radius(egui::CornerRadius { nw: 0, ne: 10, sw: 10, se: 10 })
+            .inner_margin(egui::Margin::symmetric(16, 10));
+        page.show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            self.breadcrumb(ui);
+            ui.add_space(8.0);
+            self.document(ui);
+        });
+    }
+
+    fn document(&mut self, ui: &mut egui::Ui) {
         match self.view {
             None => {
                 ui.centered_and_justified(|ui| {
                     ui.label(
-                        RichText::new("Choisissez un élément dans la barre latérale.").color(theme::colors(ui).soft),
+                        RichText::new("Ouvrez un élément dans « Gestion de projet ».").color(theme::colors(ui).soft),
                     );
                 });
             }
@@ -1443,10 +1242,26 @@ impl App {
                     });
                 }
                 Modal::About => {
-                    ui.heading("Takt Studio");
-                    ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
-                    ui.label("IDE façon TIA Portal pour automates RP2350 au temps de cycle garanti.");
-                    ui.label("Licence GPL-3.0 — https://github.com/ideaton/takt");
+                    ui.horizontal(|ui| {
+                        let logo = self.logo.get_or_insert_with(|| theme::logo_texture(ui.ctx())).clone();
+                        ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(56.0, 56.0)).corner_radius(12.0));
+                        ui.vertical(|ui| {
+                            ui.heading("Takt Studio");
+                            ui.label(RichText::new(format!("Version {}", update::VERSION)).color(theme::colors(ui).soft));
+                        });
+                    });
+                    ui.add_space(8.0);
+                    ui.label("Atelier de programmation d'automates façon TIA Portal, pour RP2350, au temps de cycle garanti.");
+                    ui.label("CONT, SCL, GRAPH et BASIC. Simulateur intégré.");
+                    ui.hyperlink_to("github.com/ideaton/takt", "https://github.com/ideaton/takt");
+                    ui.label(RichText::new("Licence GPL-3.0 · police Inter (OFL) · icônes Lucide (ISC)").size(12.0).color(theme::colors(ui).soft));
+                    ui.add_space(6.0);
+                    let mut auto = self.config.check_updates;
+                    if ui.checkbox(&mut auto, "Rechercher les mises à jour au lancement").changed() {
+                        self.config.check_updates = auto;
+                        self.config.save();
+                    }
+                    ui.add_space(6.0);
                     if ui.button("Fermer").clicked() {
                         keep = false;
                     }
@@ -1512,6 +1327,18 @@ impl App {
         }
         self.shortcuts(ctx);
         self.poll();
+        if let Some(setup) = update::poll(&mut self.update) {
+            match update::install(&setup) {
+                Ok(()) => {
+                    self.log("Installation de la mise à jour : Takt Studio va redémarrer.");
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Err(e) => self.update = update::State::Failed(format!("lancement de l'installateur : {e}")),
+            }
+        }
+        if matches!(self.update, update::State::Checking(_) | update::State::Downloading(..)) {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
 
         let title = format!(
             "Takt Studio — {}{}",
@@ -1521,68 +1348,76 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
 
         let c = if self.dark { theme::DARK } else { theme::LIGHT };
-        egui::SidePanel::left("sidebar")
-            .resizable(true)
-            .default_width(300.0)
-            .width_range(240.0..=460.0)
-            .frame(egui::Frame::new().fill(c.bar).inner_margin(egui::Margin::symmetric(10, 0)))
-            .show(ctx, |ui| {
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    ui.add_space(12.0);
-                    self.connection_box(ui);
-                    ui.add_space(6.0);
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| self.sidebar(ui));
+        let dock = egui::Frame::new().fill(c.bg).corner_radius(10.0).inner_margin(egui::Margin::same(4));
+        egui::TopBottomPanel::top("ribbon")
+            .frame(egui::Frame::new().fill(c.bar).inner_margin(egui::Margin { left: 6, right: 6, top: 6, bottom: 2 }))
+            .show_separator_line(false)
+            .show(ctx, |ui| self.ribbon(ui));
+        egui::TopBottomPanel::bottom("statusbar")
+            .exact_height(26.0)
+            .frame(egui::Frame::new().fill(c.bar).inner_margin(egui::Margin::symmetric(6, 3)))
+            .show_separator_line(false)
+            .show(ctx, |ui| self.status_bar(ui));
+        if self.show_tree {
+            egui::SidePanel::left("tree")
+                .resizable(true)
+                .default_width(290.0)
+                .width_range(220.0..=460.0)
+                .frame(egui::Frame::new().fill(c.bar).inner_margin(egui::Margin {
+                    left: 6,
+                    right: 0,
+                    top: 2,
+                    bottom: 6,
+                }))
+                .show_separator_line(false)
+                .show(ctx, |ui| {
+                    dock.show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        self.left_dock(ui);
+                    });
                 });
-            });
+        }
+        if self.show_instructions {
+            egui::SidePanel::right("toolbox")
+                .resizable(true)
+                .default_width(270.0)
+                .width_range(200.0..=420.0)
+                .frame(egui::Frame::new().fill(c.bar).inner_margin(egui::Margin {
+                    left: 0,
+                    right: 6,
+                    top: 2,
+                    bottom: 6,
+                }))
+                .show_separator_line(false)
+                .show(ctx, |ui| {
+                    dock.show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        self.toolbox(ui);
+                    });
+                });
+        }
         if self.drawer {
             egui::TopBottomPanel::bottom("drawer")
                 .resizable(true)
-                .default_height(230.0)
-                .min_height(120.0)
-                .frame(egui::Frame::new().fill(c.bg).inner_margin(egui::Margin {
-                    left: 32,
-                    right: 32,
-                    top: 10,
-                    bottom: 10,
+                .default_height(220.0)
+                .min_height(110.0)
+                .frame(egui::Frame::new().fill(c.bar).inner_margin(egui::Margin {
+                    left: 6,
+                    right: 6,
+                    top: 0,
+                    bottom: 6,
                 }))
-                .show(ctx, |ui| views::inspector(self, ui));
-        }
-        let block_view = matches!(self.view, Some(View::Block(_))) && !self.monitor;
-        if block_view && self.show_instructions {
-            egui::SidePanel::right("instructions")
-                .resizable(false)
-                .exact_width(270.0)
-                .frame(egui::Frame::new().fill(c.bg).inner_margin(egui::Margin {
-                    left: 16,
-                    right: 24,
-                    top: 8,
-                    bottom: 0,
-                }))
-                .show(ctx, |ui| self.instructions_card(ui));
-        }
-        let page =
-            egui::Frame::new().fill(c.bg).inner_margin(egui::Margin { left: 32, right: 32, top: 26, bottom: 12 });
-        egui::CentralPanel::default().frame(page).show(ctx, |ui| {
-            // Boutons pour rouvrir ce qui a été masqué
-            if !self.drawer || (block_view && !self.show_instructions) {
-                egui::Area::new(egui::Id::new("reopen"))
-                    .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-24.0, -16.0))
-                    .show(ctx, |ui| {
-                        ui.horizontal(|ui| {
-                            if block_view
-                                && !self.show_instructions
-                                && theme::secondary_button(ui, icon::BLOCKS, "Instructions").clicked()
-                            {
-                                self.show_instructions = true;
-                            }
-                            if !self.drawer && theme::secondary_button(ui, icon::SCROLL, "Messages").clicked() {
-                                self.drawer = true;
-                            }
-                        });
+                .show_separator_line(false)
+                .show(ctx, |ui| {
+                    dock.show(ui, |ui| {
+                        ui.set_min_size(ui.available_size());
+                        self.bottom_dock(ui);
                     });
-            }
-            self.central(ui);
-        });
+                });
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(c.bar).inner_margin(egui::Margin { left: 6, right: 6, top: 2, bottom: 6 }))
+            .show(ctx, |ui| self.central(ui));
         self.modals(ctx);
 
         if self.online() {
@@ -1716,6 +1551,7 @@ mod tests {
             a.run();
             a.open(View::Block(1));
             a.toggle_monitor();
+            a.ribbon_tab = RibbonTab::Automate;
         });
         std::thread::sleep(Duration::from_millis(300));
         shot(&mut h, "7-cont-visualisation");

@@ -244,6 +244,16 @@ pub fn code_editor(
                 .layouter(&mut layouter)
                 .show(ui);
             changed = out.response.changed();
+            // Position du curseur pour la barre d'état
+            if out.response.has_focus()
+                && let Some(r) = out.cursor_range
+            {
+                let idx = r.primary.ccursor.index;
+                let before: String = source.chars().take(idx).collect();
+                let line = before.matches('\n').count() + 1;
+                let col = before.rsplit('\n').next().map(|l| l.chars().count()).unwrap_or(0) + 1;
+                ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("takt_cursor"), (line, col)));
+            }
 
             if let Some(line) = goto_line.take() {
                 let idx: usize =

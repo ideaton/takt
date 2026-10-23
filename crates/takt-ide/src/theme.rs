@@ -76,7 +76,6 @@ pub mod icon {
     pub const DOWNLOAD: char = '\u{e0b2}';
     pub const PLUG: char = '\u{e37f}';
     pub const UNPLUG: char = '\u{e45d}';
-    pub const MORE: char = '\u{e0b6}';
     pub const SAVE: char = '\u{e14d}';
     pub const FOLDER: char = '\u{e247}';
     pub const FILE_PLUS: char = '\u{e0c9}';
@@ -98,6 +97,9 @@ pub mod icon {
     pub const CHEVRON_DOWN: char = '\u{e06d}';
     pub const CHEVRON_RIGHT: char = '\u{e06f}';
     pub const CHEVRON_UP: char = '\u{e070}';
+    pub const PLAY: char = '\u{e13c}';
+    pub const SQUARE: char = '\u{e167}';
+    pub const FLASK: char = '\u{e0d5}';
     pub const FOLDER_CLOSED: char = '\u{e0d7}';
     pub const SETTINGS: char = '\u{e154}';
     pub const ACTIVITY: char = '\u{e038}';
@@ -257,15 +259,6 @@ pub fn icon_text(ch: char, size: f32) -> RichText {
     RichText::new(ch.to_string()).font(FontId::new(size, icons()))
 }
 
-/// Titre de page, comme « Tâches » dans Sura Novi.
-pub fn page_title(ui: &mut Ui, title: &str, subtitle: &str) {
-    let c = colors(ui);
-    ui.label(RichText::new(title).font(FontId::new(28.0, semi())).color(c.text));
-    if !subtitle.is_empty() {
-        ui.label(RichText::new(subtitle).size(14.0).color(c.soft));
-    }
-}
-
 pub fn section_title(ui: &mut Ui, title: &str) {
     ui.label(RichText::new(title).font(FontId::new(16.0, semi())).color(colors(ui).text));
 }
@@ -336,34 +329,12 @@ pub fn ghost_icon(ui: &mut Ui, ic: char, tip: &str) -> Response {
     resp.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Bouton bleu plein (« + Nouvelle tâche » dans Sura Novi).
-pub fn primary_button(ui: &mut Ui, ic: char, label: &str) -> Response {
-    let c = colors(ui);
-    let text = rich(&format!("{ic}  {label}"), 14.0, medium(), Color32::WHITE);
-    ui.add(egui::Button::new(text).fill(c.accent).corner_radius(9.0).min_size(vec2(0.0, 34.0)))
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
 /// Bouton gris clair.
 pub fn secondary_button(ui: &mut Ui, ic: char, label: &str) -> Response {
     let c = colors(ui);
     let text = rich(&format!("{ic}  {label}"), 14.0, medium(), c.text);
     ui.add(egui::Button::new(text).fill(c.group).corner_radius(9.0).min_size(vec2(0.0, 34.0)))
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-}
-
-/// Bouton bascule : bleu clair quand il est actif.
-pub fn toggle_button(ui: &mut Ui, ic: char, label: &str, on: bool) -> Response {
-    let c = colors(ui);
-    let fg = if on { c.accent } else { c.text };
-    let text = rich(&format!("{ic}  {label}"), 14.0, medium(), fg);
-    ui.add(
-        egui::Button::new(text)
-            .fill(if on { c.accent_soft } else { c.group })
-            .corner_radius(9.0)
-            .min_size(vec2(0.0, 34.0)),
-    )
-    .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Pastille colorée (« Prioritaire », « Ideaton » dans Sura Novi).
