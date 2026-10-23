@@ -129,6 +129,29 @@ le pire cas exact et interdit la récursion par construction.
 | `examples/` | Projet d'exemple : convoyeur avec un OB en SCL, le moteur en CONT, la moyenne en BASIC et le graissage en GRAPH. |
 | `tools/logo.py` | Génère le logo (SVG, PNG, ICO). |
 
+## Installer
+
+Téléchargez `TaktStudio-<version>-setup.exe` dans les
+[Releases](https://github.com/ideaton/takt/releases) et lancez-le. Aucun droit
+administrateur n'est nécessaire : Takt Studio s'installe dans
+`%LOCALAPPDATA%\Programs\Takt Studio`, avec un raccourci dans le menu Démarrer
+et sur le bureau. Les fichiers `.takt` s'ouvrent par double-clic, et le projet
+d'exemple est copié dans `Documents\Takt`. La désinstallation se fait depuis
+« Applications installées » de Windows et garde vos projets.
+
+Takt Studio vérifie au lancement s'il existe une version plus récente (option
+dans « À propos »). « Installer et redémarrer » télécharge l'installateur,
+vérifie son empreinte SHA-256 et met l'appli à jour.
+
+### Publier une version
+
+1. Augmenter `version` dans `Cargo.toml` et ajouter sa section dans `CHANGELOG.md`.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z`
+
+Le workflow `Publication` lance les tests, construit l'installateur
+(`tools/installeur.sh`, NSIS) et le publie avec son `.sha256`. Pour construire
+l'installateur en local : `bash tools/installeur.sh`.
+
 ## Compiler et lancer
 
 ```bash

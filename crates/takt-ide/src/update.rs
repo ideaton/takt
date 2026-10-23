@@ -1,10 +1,15 @@
 //! Mises à jour par les « Releases » GitHub du projet : l'appli regarde la
 //! dernière version publiée, et sur demande télécharge son installateur et le
 //! lance en mode mise à jour (il ferme l'appli, la remplace et la relance).
+//!
+//! L'installateur n'est lancé que s'il vient des Releases du dépôt et que son
+//! empreinte SHA-256 correspond au fichier `.sha256` publié à côté.
 
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
+
+use sha2::{Digest, Sha256};
 
 const LATEST: &str = "https://api.github.com/repos/ideaton/takt/releases/latest";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -15,6 +20,8 @@ pub struct Release {
     pub notes: String,
     pub url: String,
     pub file: String,
+    /// Adresse du fichier `<installateur>.sha256`.
+    pub sha_url: String,
 }
 
 pub enum State {
@@ -55,28 +62,56 @@ fn check() -> Result<Option<Release>, String> {
     let Some(asset) = asset else {
         return Ok(None);
     };
+    let file = asset["name"].as_str().unwrap_or("TaktStudio-setup.exe").to_string();
+    let sha_name = format!("{file}.sha256");
+    let sha_url = json["assets"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["name"].as_str() == Some(sha_name.as_str())))
+        .and_then(|x| x["browser_download_url"].as_str())
+        .unwrap_or_default()
+        .to_string();
     Ok(Some(Release {
         version: tag,
         notes: json["body"].as_str().unwrap_or_default().to_string(),
         url: asset["browser_download_url"].as_str().unwrap_or_default().to_string(),
-        file: asset["name"].as_str().unwrap_or("TaktStudio-setup.exe").to_string(),
+        file,
+        sha_url,
     }))
 }
 
-fn download(r: &Release) -> Result<PathBuf, String> {
-    if !r.url.starts_with("https://github.com/ideaton/takt/releases/download/") {
+const RELEASES: &str = "https://github.com/ideaton/takt/releases/download/";
+
+fn fetch(url: &str, limit: u64) -> Result<Vec<u8>, String> {
+    if !url.starts_with(RELEASES) {
         return Err("adresse de téléchargement inattendue".into());
     }
-    let mut resp = agent().get(&r.url).call().map_err(|e| format!("téléchargement : {e}"))?;
+    let mut resp = agent().get(url).call().map_err(|e| format!("téléchargement : {e}"))?;
     let mut bytes = Vec::new();
-    resp.body_mut()
-        .as_reader()
-        .take(200 * 1024 * 1024)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("téléchargement : {e}"))?;
+    resp.body_mut().as_reader().take(limit).read_to_end(&mut bytes).map_err(|e| format!("téléchargement : {e}"))?;
+    Ok(bytes)
+}
+
+/// Vérifie l'empreinte d'un fichier contre le contenu d'un `.sha256`
+/// (format `sha256sum` : l'empreinte en hexadécimal, puis le nom du fichier).
+pub fn verify(bytes: &[u8], sha_file: &str) -> Result<(), String> {
+    let expected = sha_file.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
+    let actual: String = Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect();
+    if expected.len() != 64 || expected != actual {
+        return Err("empreinte SHA-256 différente : installateur refusé".into());
+    }
+    Ok(())
+}
+
+fn download(r: &Release) -> Result<PathBuf, String> {
+    if r.sha_url.is_empty() {
+        return Err("cette version ne publie pas d'empreinte SHA-256 : mise à jour refusée".into());
+    }
+    let sha = String::from_utf8(fetch(&r.sha_url, 4096)?).map_err(|_| "empreinte illisible".to_string())?;
+    let bytes = fetch(&r.url, 200 * 1024 * 1024)?;
     if bytes.len() < 1024 || &bytes[..2] != b"MZ" {
         return Err("le fichier téléchargé n'est pas un installateur".into());
     }
+    verify(&bytes, &sha)?;
     let dir = std::env::temp_dir().join("TaktStudio-maj");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(&r.file);
@@ -129,4 +164,17 @@ pub fn poll(state: &mut State) -> Option<PathBuf> {
         *state = n;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empreinte() {
+        let sha = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824  TaktStudio-1.0.0-setup.exe";
+        assert!(verify(b"hello", sha).is_ok());
+        assert!(verify(b"hellO", sha).is_err());
+        assert!(verify(b"hello", "").is_err());
+    }
 }

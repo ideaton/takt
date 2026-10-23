@@ -1,0 +1,45 @@
+# Publication d'une version : poussez un tag vX.Y.Z identique à la version de Cargo.toml.
+# GitHub construit l'installateur Windows et le publie dans les Releases avec son
+# empreinte SHA-256. Takt Studio le propose ensuite en mise à jour.
+name: Publication
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: NSIS
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
+          echo "C:\Program Files (x86)\NSIS" >> $env:GITHUB_PATH
+      - name: Version du tag
+        shell: bash
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "Le tag $GITHUB_REF_NAME ne correspond pas à la version $v de Cargo.toml"; exit 1
+          fi
+          # Notes de version : la section correspondante de CHANGELOG.md
+          awk -v v="$v" '$0 ~ "^## "v {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+          test -s notes.md || echo "Takt Studio $v" > notes.md
+      - name: Tests
+        run: cargo test --workspace
+      - name: Installateur
+        shell: bash
+        run: bash tools/installeur.sh
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Takt Studio ${{ github.ref_name }}
+          body_path: notes.md
+          files: |
+            target/installeur/TaktStudio-*-setup.exe
+            target/installeur/TaktStudio-*-setup.exe.sha256
